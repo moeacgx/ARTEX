@@ -316,6 +316,7 @@ function ProfileSheet({
   const [baseUrl, setBaseUrl] = React.useState("");
   const [proxy, setProxy] = React.useState("");
   const [apiKey, setApiKey] = React.useState("");
+  const [replaceApiKey, setReplaceApiKey] = React.useState(false);
   const [keyHint, setKeyHint] = React.useState("");
   const [rps, setRps] = React.useState("0");
   const [rpm, setRpm] = React.useState("0");
@@ -357,19 +358,22 @@ function ProfileSheet({
     setSessionHeaderKey(profile?.session_header_key ?? "");
     setRetry(profile?.retry ?? ZERO_OVERRIDE);
     setApiKey("");
+    setReplaceApiKey(false);
     setKeyHint(profile?.api_key_hint ?? "");
     setModels([]);
     setModelsOpen(false);
   }, [open, profile]);
 
   const profileId = profile ? Number(profile.id) : undefined;
+  // 编辑时只有明确选择更换，才允许把输入值用于保存、测试和拉取模型。
+  const requestApiKey = isNew || replaceApiKey ? apiKey : "";
 
   async function loadModels() {
     if (loadingModels) return;
     setLoadingModels(true);
     setModels([]);
     try {
-      const r = await api.fetchLLMModels(format, baseUrl, apiKey, proxy, profileId);
+      const r = await api.fetchLLMModels(format, baseUrl, requestApiKey, proxy, profileId);
       if (r.ok && r.models && r.models.length > 0) {
         setModels(r.models);
         setModelsOpen(true);
@@ -394,7 +398,7 @@ function ProfileSheet({
         format,
         model,
         baseUrl,
-        apiKey,
+        requestApiKey,
         proxy,
         toStore(thinkingType),
         toStore(effort),
@@ -430,7 +434,7 @@ function ProfileSheet({
         model: model.trim(),
         base_url: baseUrl.trim(),
         proxy: proxy.trim(),
-        api_key: apiKey,
+        api_key: requestApiKey,
         rate_per_second: Number(rps) || 0,
         rate_per_minute: Number(rpm) || 0,
         context_window_k: Number(cw) || 0,
@@ -595,14 +599,60 @@ function ProfileSheet({
           </div>
 
           <div className="grid gap-2">
-            <Label htmlFor="p-api-key">API Key</Label>
-            <Input
-              id="p-api-key"
-              type="password"
-              placeholder={keyHint ? `已设置（${keyHint}），留空保持不变` : "sk-…"}
-              value={apiKey}
-              onChange={(e) => setApiKey(e.target.value)}
-            />
+            {isNew || replaceApiKey ? (
+              <>
+                <Label htmlFor="p-api-key">{isNew ? "API Key" : "新的 API Key"}</Label>
+                <Input
+                  id="p-api-key"
+                  name="llm-api-key"
+                  type="password"
+                  autoComplete="new-password"
+                  data-1p-ignore="true"
+                  data-lpignore="true"
+                  data-form-type="other"
+                  spellCheck={false}
+                  autoCorrect="off"
+                  autoCapitalize="none"
+                  placeholder={isNew ? "sk-…" : "输入新的 API Key，留空保持原 Key"}
+                  value={apiKey}
+                  onChange={(e) => setApiKey(e.target.value)}
+                />
+                {!isNew && (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => {
+                      setApiKey("");
+                      setReplaceApiKey(false);
+                    }}
+                  >
+                    取消更换
+                  </Button>
+                )}
+              </>
+            ) : (
+              <>
+                <Label>API Key</Label>
+                <div className="flex items-center justify-between gap-3">
+                  <span className="text-muted-foreground text-sm">
+                    {keyHint ? `已保存（${keyHint}）` : "保留现有 Key"}
+                  </span>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => {
+                      setApiKey("");
+                      setReplaceApiKey(true);
+                    }}
+                  >
+                    更换 API Key
+                  </Button>
+                </div>
+                <p className="text-muted-foreground text-xs">保存其他设置、测试连接和获取模型时使用已保存的 Key。</p>
+              </>
+            )}
           </div>
 
           <div className="grid gap-4 sm:grid-cols-3">
