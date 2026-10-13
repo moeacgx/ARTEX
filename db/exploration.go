@@ -201,6 +201,11 @@ func (s *ExplorationStore) AddNode(kind string, payload map[string]any, priority
 		return 0, err
 	}
 	defer tx.Rollback()
+	// 追加目标与完成判定按同一探索根串行，防止旧规划轮关闭刚追加的工作。
+	var root int64
+	if err := tx.QueryRow(`SELECT id FROM explorations WHERE id=$1 FOR UPDATE`, s.expID).Scan(&root); err != nil {
+		return 0, err
+	}
 	var id int64
 	if err := tx.QueryRow(`
 INSERT INTO exploration_nodes(exploration_id, kind, payload, priority, state, origin)
@@ -210,6 +215,22 @@ VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
 	}
 	for _, a := range anchors {
 		if _, err := tx.Exec(`INSERT INTO exploration_anchors(node_id, asset_id) VALUES ($1,$2) ON CONFLICT DO NOTHING`, id, a); err != nil {
+			return 0, err
+		}
+	}
+	if kind == KindIntent && state == "open" && origin == "human" {
+		// 人工追加方向有独立验收范围，目标与意图同时提交；不重置历史 met 目标。
+		goalRaw, err := json.Marshal(map[string]any{"text": "完成追加工作：" + fmt.Sprint(payload["summary"]), "intent_id": id})
+		if err != nil {
+			return 0, err
+		}
+		var goalID int64
+		if err := tx.QueryRow(`INSERT INTO exploration_nodes(exploration_id,kind,payload,priority,state,origin)
+			VALUES($1,'goal',$2,0,'open','human') RETURNING id`, s.expID, string(goalRaw)).Scan(&goalID); err != nil {
+			return 0, err
+		}
+		if _, err := tx.Exec(`INSERT INTO exploration_edges(exploration_id,src_id,rel,dst_id)
+			VALUES($1,$2,$3,$4)`, s.expID, goalID, RelSpawns, id); err != nil {
 			return 0, err
 		}
 	}

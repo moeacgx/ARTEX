@@ -42,7 +42,7 @@ func TestLLMTerminalMainAgentReacquiresLeaseAndDrainsRealTool(t *testing.T) {
 				}
 			}
 			if !used {
-				fmt.Fprint(w, `{"choices":[{"message":{"role":"assistant","tool_calls":[{"id":"call_http","type":"function","function":{"name":"admitted_http","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}`)
+				fmt.Fprint(w, `{"choices":[{"message":{"role":"assistant","tool_calls":[{"id":"call_http","type":"function","function":{"name":"test_proxies","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}`)
 			} else {
 				fmt.Fprint(w, `{"choices":[{"message":{"role":"assistant","content":"finished"},"finish_reason":"stop"}]}`)
 			}
@@ -96,15 +96,18 @@ func TestLLMTerminalMainAgentReacquiresLeaseAndDrainsRealTool(t *testing.T) {
 	}
 	waitModelTaskProxyIdle(t, s, task.ID)
 	old := agent.ToolAugment
+	oldResolve := agent.ToolResolve
+	// 本用例显式授权合成代理管理工具；不继承其他 Server 用例安装的全局数据库绑定。
+	agent.ToolResolve = nil
 	agent.ToolAugment = func(context.Context, string) ([]actool.CoreTool, agent.DeferredInfo, func()) {
-		return []actool.CoreTool{roTool("admitted_http", "测试正式准入HTTP工具", objSchema(map[string]any{}), func(ctx context.Context, _ json.RawMessage) (actool.Result, error) {
+		return []actool.CoreTool{roTool("test_proxies", "测试代理中心管理工具的正式准入HTTP调用", objSchema(map[string]any{}), func(ctx context.Context, _ json.RawMessage) (actool.Result, error) {
 			if !s.m.TaskProxyOperationAdmitted(ctx, task.ID) {
 				return actool.Errorf("缺少正式准入凭证"), nil
 			}
 			return s.runHTTPTool(ctx, json.RawMessage(`{"url":"http://target.invalid/blocked"}`), nil, nil)
 		})}, agent.DeferredInfo{}, func() {}
 	}
-	t.Cleanup(func() { agent.ToolAugment = old })
+	t.Cleanup(func() { agent.ToolAugment = old; agent.ToolResolve = oldResolve })
 	api := modelHTTPClient(t, s)
 	api("POST", "/api/chat?task="+task.ID, `{"message":"调用HTTP工具"}`, 202)
 	select {

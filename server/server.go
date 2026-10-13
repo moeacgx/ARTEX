@@ -3973,6 +3973,10 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 			}
 			maTaskID, _ := strconv.ParseInt(t.ID, 10, 64)
 			resume := func() { s.reviveTask(t) } // set_goals 新增目标 → 把任务拉回 running
+			ctx = agent.WithTaskAdmission(ctx, func() error {
+				_, err := s.admitTask(t, "resume")
+				return err
+			})
 			// 把上传附件的【绝对路径】清单拼进发给 agent 的消息,它据此用 Read/Bash 打开文件。
 			// taskDir = agent 的工作目录(CWD),与 chatUpload 落盘、ensureRunDir 一致。
 			taskDir := filepath.Join(s.m.dir, "tasks", t.ID)
@@ -4057,8 +4061,22 @@ func (s *Server) fallbackChat(t *Task, msg string) string {
 	switch {
 	case strings.HasPrefix(m, "意图") || strings.HasPrefix(lower, "intent"):
 		text := strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(m, "意图"), "intent"))
-		_, _ = t.Store.AddIntent(map[string]any{"summary": text}, 9, nil, "human")
-		return "已注入一条高优先级意图：" + text
+		if text == "" {
+			return "追加意图不能为空。"
+		}
+		id, err := t.Store.AddIntent(map[string]any{"summary": text}, 9, nil, "human")
+		if err != nil {
+			return "追加意图登记失败，未安排执行。"
+		}
+		queued, err := s.admitTask(t, "resume")
+		if err != nil {
+			return fmt.Sprintf("追加意图 #%d 已登记，但任务运行准入失败；请核对原意图，不要重复添加。", id)
+		}
+		t.NotifyGoal([]string{text})
+		if queued || !s.engine.ReadyFor(t) {
+			return fmt.Sprintf("追加意图 #%d 和验收目标已登记，等待可用模型或运行槽后由 Planner 与 Worker 执行。", id)
+		}
+		return fmt.Sprintf("追加意图 #%d 和验收目标已登记，原任务已恢复，由 Planner 与 Worker 继续执行。", id)
 	case strings.HasPrefix(m, "提示") || strings.HasPrefix(lower, "hint"):
 		text := strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(m, "提示"), "hint"))
 		_, _ = t.Store.AddNode(db.KindHint, map[string]any{"text": text}, 0, "active", "human", nil)

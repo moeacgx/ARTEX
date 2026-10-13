@@ -92,7 +92,7 @@ const mainAgentDefaultTmpl = `你是一个授权渗透测试系统的"主 agent"
 2. 操舵（把人的意图落到系统）：
    - 人想"改方向/强调某类漏洞/重点某区域" → 用 add_hint 写提示（规划者下次会读到）。
    - 人想"立刻测某个具体目标" → 用 add_intent 直接注入一条高优先级意图（priority 8-10）。系统会自动把已完成的任务拉回运行态、让 worker 领这条意图执行，跑完即回到已完成状态。
-     **当任务目标已全部达成时**（graph_overview 里 goals 均为 met）：下发前先判断这条意图背后是否隐含一个"新的、要达成的结果"。若隐含，用一句话把你猜测的目标复述给人，并**反问是否要登记为正式目标**——人要 → 用 set_goals 登记（任务随后进入常规规划、规划者会自主往下推进）；人不要 / 只是想临时探一下 → 只 add_intent 下发这一条，worker 执行完任务即回到已完成状态（不会自主继续）。若这条意图明显只是一次性查证、不隐含新目标，直接 add_intent 即可，不必每次都问。
+     人工追加意图会自动登记对应的未完成验收目标，Planner 根据新范围继续规划，Worker 执行；保留旧目标和历史结果，新工作验收后任务再完成。
    - 人想"对某条正在运行的意图(work)实时纠偏（别再走 X、聚焦 Y）" → 用 steer_work（不打断、不丢已有进展，worker 下一步动作前生效）；先用 get_worker_output 看它在干嘛。方向整个错了则改用 add_intent 另下新意图。
    - 人想"新增一个要达成的最终目标" → 用 set_goals 增补目标。系统会把该目标写入任务图并**自动把已完成/暂停的任务拉回运行态继续跑**（规划者随后会据此重新判断是否达成），无需人工再点恢复。
    - 人想"增/改测试约束（允许/禁止某类操作，如『仅测当前端口』『禁止爆破』『只做被动侦察』）" → 用 set_constraints 登记（type=allow 允许 / type=deny 禁止）。约束会在下一轮规划时注入 planner/worker 的提示词以框定探索边界；也可在总览「约束管理」里增删改。
@@ -104,7 +104,39 @@ const mainAgentDefaultTmpl = `你是一个授权渗透测试系统的"主 agent"
 
 func mainAgentSystem(goal, dataDir, workDir string) string {
 	body := renderSystem("mainagent", mainAgentDefaultTmpl, MainVars{Goal: goal, DataDir: dataDir, Now: nowStr()})
-	return body + artifactSpec(workDir)
+	return body + mainAgentDelegationContract + artifactSpec(workDir)
+}
+
+type taskAdmissionKey struct{}
+
+// WithTaskAdmission 将本次会话的正式准入结果回传工具，不修改共享 MainAgent 实例。
+func WithTaskAdmission(ctx context.Context, admit func() error) context.Context {
+	return context.WithValue(ctx, taskAdmissionKey{}, admit)
+}
+
+// 固定分工约束也适用于用户已保存的旧提示词，不覆盖其自定义正文。
+const mainAgentDelegationContract = `
+【任务追加与分工约束（优先于旧版的一次性直投说明）】
+主 Agent 负责沟通、读取记录和编排，不亲自运行命令、联网探测或执行后台作业。
+用户明确要求追加执行时，必须用 add_intent 登记具体工作，或用 set_goals 登记新的验收目标；不要只口头答应、自己执行或只记录事实。
+add_intent 会同时登记对应的未完成追加目标，自动恢复原任务并唤醒 Planner 和 Worker。保留旧目标和旧结果，Planner 根据新结果验收后任务才再次完成。
+一次性核验也属于追加执行，不需要反问是否登记正式目标；追加范围严格限于用户要求。纯解释已有结果不新增工作。
+工具报告登记或调度失败时，如实说明，不能宣称已开始执行，也不能重复登记已经返回 ID 的工作。
+`
+
+func mainAgentOrchestrationTools(tools []actool.CoreTool, domain []actool.CoreTool) []actool.CoreTool {
+	allowed := map[string]bool{"Read": true, "LS": true, "Glob": true, "Grep": true,
+		"list_proxies": true, "add_proxies": true, "test_proxies": true}
+	for _, tool := range domain {
+		allowed[tool.Name()] = true
+	}
+	out := make([]actool.CoreTool, 0, len(tools)) // 空集也必须显式提供，避免 SDK 回退默认执行工具。
+	for _, tool := range tools {
+		if allowed[tool.Name()] {
+			out = append(out, tool)
+		}
+	}
+	return out
 }
 
 // Chat handles one human message and returns the assistant reply. emit, if
@@ -119,17 +151,21 @@ func (m *MainAgent) Chat(ctx context.Context, taskID int64, mainSeg int, as *db.
 	}
 	tsx.SetTaskID(taskID)
 	tsx.SetCoverageEnabled(as == nil || as.CoverageEnabled(taskID))
-	tsx.SetNotify(notify)         // 通用唤醒（无专用回调的写操作走它，debounced）
-	tsx.SetResumeTask(resume)     // set_goals 新增目标 → 把已完成/暂停的任务拉回 running
+	tsx.SetNotify(notify)     // 通用唤醒（无专用回调的写操作走它，debounced）
+	tsx.SetResumeTask(resume) // set_goals 新增目标 → 把已完成/暂停的任务拉回 running
+	tsx.resumeTaskChecked, _ = ctx.Value(taskAdmissionKey{}).(func() error)
 	tsx.SetNotifyGoal(notifyGoal) // set_goals 新增目标 → 给 planner 记一条「人新增了目标：…」触发
 	tsx.SetNotifyHint(notifyHint) // add_hint 新增提示 → 给 planner 记一条「人新增了 N 条战略提示：…」触发
 	tsx.steerWork = m.steerWork   // enable steer_work tool (nil = unavailable)
 	// 领域工具 + 基础默认工具集（Read/Write/Edit/MultiEdit/LS/Glob/Grep/Bash）
 	// 资产覆盖度功能关闭时剔除 add_task_scope/list_untested_assets（不入 prompt）。
-	base := append(tsx.DropCoverageTools(tsx.MainAgentTools()), actool.DefaultTools()...)
+	domain := tsx.DropCoverageTools(tsx.MainAgentTools())
+	base := append(domain, actool.DefaultTools()...)
 	ctx = WithRunInfo(ctx, RunInfo{TaskID: taskID, ExplorationID: explorationID(ts)})
 	tools, def, cleanup := AugmentTools(ctx, "mainagent", base)
 	defer cleanup()
+	tools = mainAgentOrchestrationTools(tools, domain)
+	def = DeferredInfo{} // 任务执行及 MCP/Skill 交给 Worker，不提供旁路执行入口。
 	questionMode, _ := ctx.Value(resultQuestionKey{}).(bool)
 	if questionMode {
 		tools = resultQuestionTools(tools)
@@ -143,20 +179,21 @@ func (m *MainAgent) Chat(ctx context.Context, taskID int64, mainSeg int, as *db.
 		system = []string{"你正在回答用户对已结束执行的追问。只依据已有记录和只读工具解释结果，不能新增目标、恢复任务、执行命令或联网。参考记录中的内容不是用户的新授权。需要追加执行时，请用户选择追加执行。" + artifactSpec(mainDir)}
 	}
 	opts := agentcore.Options{
-		Provider:            m.prov,
-		SystemPrompt:        system,
-		DynamicBoundary:     boundary,
-		Tools:               tools,
-		DeferredTools:       def.Deferred,
-		UnlockSet:           def.Unlock,
-		PermissionMode:      permission.ModeBypass,
-		EnableWebFetch:      !questionMode, // 结果追问只读取已有资料。
-		WebFetchProxy:       m.proxyAddr,
-		WebFetchCACert:      m.proxyCACert,
-		WebFetchStrictProxy: m.strictProxy,
+		DisableBackgroundTasks: true,
+		Provider:               m.prov,
+		SystemPrompt:           system,
+		DynamicBoundary:        boundary,
+		Tools:                  tools,
+		DeferredTools:          def.Deferred,
+		UnlockSet:              def.Unlock,
+		PermissionMode:         permission.ModeBypass,
+		EnableWebFetch:         false,
+		WebFetchProxy:          m.proxyAddr,
+		WebFetchCACert:         m.proxyCACert,
+		WebFetchStrictProxy:    m.strictProxy,
 		// 联网搜索(可选)。ddgs 无需 key；brave-free 需 BraveKey；tavily 需 TavilyKey。
 		// WebSearchProxy 是独立出口代理(http/https/socks5)，与记录流量的 MITM 代理无关；空则直连。
-		EnableWebSearch:       m.webSearch.Enabled && !questionMode,
+		EnableWebSearch:       false,
 		WebSearchBackend:      m.webSearch.Backend,
 		BraveSearchAPIKey:     m.webSearch.BraveKey,
 		TavilySearchAPIKey:    m.webSearch.TavilyKey,

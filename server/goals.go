@@ -191,8 +191,9 @@ func (s *Server) admitTaskWhen(t *Task, mode string, requirePaused bool) (queued
 		}
 		return false, err
 	}
-	if lifecycle.Status == "timeout" && status == "running" {
-		// ApplyTaskAdmission reset this timed-out run's persisted clock. Clear the
+	if wasTerminal && status == "running" {
+		// 终态任务追加执行已重置持久时钟，同步清除旧预算及收尾门。
+		// ApplyTaskAdmission reset the completed run's persisted clock. Clear the
 		// matching Engine gates before either parking it in FIFO or starting work;
 		// otherwise the old settling flag would make every worker skip forever.
 		s.engine.resetTimeoutRevival(t.ID)

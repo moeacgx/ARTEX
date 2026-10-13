@@ -93,7 +93,8 @@ type ToolSet struct {
 	// paused task back to running and (re)starts the engine loops — a plain notify()
 	// can't, because the planner's terminal gate swallows wakes. Wired ONLY for the
 	// main agent (human steering); nil for the goals decomposer and workers.
-	resumeTask func()
+	resumeTask        func()
+	resumeTaskChecked func() error
 	// notifyGoal, if set, wakes the planner AND records ONE "人新增了 N 个目标：…" trigger
 	// for a whole set_goals call (batch-aware — one call, one trigger, not one per goal)
 	// so the next round spells out the added goals (instead of the planner having to
@@ -121,6 +122,16 @@ func (t *ToolSet) SetNotifyHint(fn func([]string)) { t.notifyHint = fn }
 // SetResumeTask wires the task-revive callback (see ToolSet.resumeTask). Set only by
 // the main-agent chat, so runtime-added goals can pull a finished task back to running.
 func (t *ToolSet) SetResumeTask(fn func()) { t.resumeTask = fn }
+
+func (t *ToolSet) resumeAddedWork() error {
+	if t.resumeTaskChecked != nil {
+		return t.resumeTaskChecked()
+	}
+	if t.resumeTask != nil {
+		t.resumeTask()
+	}
+	return nil
+}
 
 // SetNotify wires the planner-wake callback (see ToolSet.notify). Set by callers
 // that hold the task handle (main-agent chat, cross-task orchestration).
@@ -1068,7 +1079,11 @@ func (t *ToolSet) addOneIntent(it intentItem) (int64, error) {
 	if len(anchors) > 0 {
 		payload["asset_ids"] = anchors
 	}
-	id, err := t.ts.AddIntent(payload, priority, anchors, "planner")
+	origin := "planner"
+	if t.worker == "human" {
+		origin = "human"
+	}
+	id, err := t.ts.AddIntent(payload, priority, anchors, origin)
 	if err != nil {
 		return 0, err
 	}
@@ -1123,12 +1138,20 @@ func (t *ToolSet) addIntent() actool.CoreTool {
 				createdAny = true
 			}
 
-			// 人经主 agent 直投意图 → 若任务已 done（无 open 目标的 goalless 分支），把它
-			// 拉回 running，worker 才能领这条意图执行。resumeTask 仅由主 agent 的 Chat 接入
-			// (SetResumeTask)；planner 的 ToolSet 为 nil，故 planner 自己调 add_intent 时此段
-			// no-op，不影响其正常产意图。意图节点已在上面建好(open)，复活时不会被误判抽干。
-			if createdAny && t.resumeTask != nil {
-				t.resumeTask()
+			// 人工意图及对应验收目标已原子登记，正式准入后再由 Planner/Worker 推进。
+			if createdAny {
+				if err := t.resumeAddedWork(); err != nil {
+					return actool.Errorf(fmt.Sprintf("追加意图已登记 ids=%v，但任务运行准入失败；尚未开始执行，请核对原 ID，不要重复登记：%v", ids, err)), nil
+				}
+			}
+			if createdAny && t.worker == "human" && t.notifyGoal != nil {
+				var texts []string
+				for i, it := range items {
+					if ids[i] > 0 {
+						texts = append(texts, strings.TrimSpace(it.Summary))
+					}
+				}
+				t.notifyGoal(texts)
 			}
 
 			if !batch { // 单条：保持原返回
@@ -1520,8 +1543,8 @@ func (t *ToolSet) setGoals() actool.CoreTool {
 				}
 				// 主 agent 运行时新增目标 → 把已完成/暂停的任务拉回 running 继续跑(终态门会
 				// 吞掉普通 notify,必须显式复活)。仅 mainagent 接了此回调;拆解器/worker 为 nil。
-				if t.resumeTask != nil {
-					t.resumeTask()
+				if err := t.resumeAddedWork(); err != nil {
+					return actool.Errorf(fmt.Sprintf("目标已登记 ids=%v，但任务运行准入失败；尚未开始执行，请核对原 ID，不要重复登记：%v", ids, err)), nil
 				}
 			}
 

@@ -17,7 +17,7 @@ func resultQuestionTools(tools []actool.CoreTool) []actool.CoreTool {
 		"graph_overview": true, "list_findings": true, "list_facts": true, "node_detail": true,
 		"expand_digest": true, "get_worker_output": true, "get_worker_trace": true,
 		"search_all_worker_traces": true, "list_assets": true, "list_untested_assets": true}
-	var out []actool.CoreTool
+	out := make([]actool.CoreTool, 0, len(tools))
 	for _, tool := range tools {
 		if allowed[tool.Name()] {
 			out = append(out, tool)

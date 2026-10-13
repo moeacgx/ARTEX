@@ -1233,11 +1233,11 @@ func (m *Manager) ApplyTaskAdmission(id, expectedStatus, status string, queued b
 	        ELSE 'resume'
 	    END,
 	    first_run_at=CASE
-	        WHEN $6='timeout' AND $2 NOT IN ('done','failed','timeout') THEN NULL
+        WHEN $6 IN ('done','failed','timeout') AND $2 NOT IN ('done','failed','timeout') THEN NULL
 	        ELSE first_run_at
 	    END,
 	    deadline_at=CASE
-	        WHEN $6='timeout' AND $2 NOT IN ('done','failed','timeout') THEN NULL
+        WHEN $6 IN ('done','failed','timeout') AND $2 NOT IN ('done','failed','timeout') THEN NULL
 	        ELSE deadline_at
 	    END
 	WHERE id=$1 AND deleted_at IS NULL AND status=$6
@@ -1432,13 +1432,26 @@ func (m *Manager) StampTaskFirstRun(id string) (int64, error) {
 // (resolves the completed↔timeout race — first terminal writer wins). Reflects the
 // won status on the live handle. won=false means another terminal already stuck.
 func (m *Manager) SetTaskStatusGuarded(id, status string) (won bool, err error) {
+	return m.setTaskTerminalGuarded(id, status, false)
+}
+
+// 追加工作结束前必须同时验收目标并排空 Worker，不能依赖旧规划轮的内存结论。
+func (m *Manager) completeTaskIfIdle(id string) (bool, error) {
+	return m.setTaskTerminalGuarded(id, "done", true)
+}
+
+func (m *Manager) setTaskTerminalGuarded(id, status string, checkGraph bool) (won bool, err error) {
 	m.taskStateMu.Lock()
 	defer m.taskStateMu.Unlock()
 	n, err := strconv.ParseInt(id, 10, 64)
 	if err != nil {
 		return false, err
 	}
-	won, err = m.pg.SetTerminalStatusGuarded(n, status)
+	if checkGraph {
+		won, err = m.pg.CompleteTaskIfIdle(n)
+	} else {
+		won, err = m.pg.SetTerminalStatusGuarded(n, status)
+	}
 	if err != nil || !won {
 		return won, err
 	}
