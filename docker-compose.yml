@@ -18,7 +18,7 @@ services:
     # 镜像由本仓库的版本标签自动发布到 GitHub Packages。
     # 正常部署直接拉取本镜像；拉取失败（或想改代码）时本地构建：
     #   docker compose build
-    image: ghcr.io/moeacgx/artex:${ARTEX_TAG:-latest}
+    image: ghcr.io/moeacgx/artex-p:${ARTEX_TAG:-latest}
     build:
       context: .
       dockerfile: Dockerfile

@@ -2,59 +2,32 @@
 
 # ARTEX-P
 
-AI 自主渗透测试系统 · 自用持续维护分支（Go 后端 + Next.js 前端）
+AI 自主渗透测试系统 · 自用持续维护分支
 
-
-🌐 **原项目在线 Demo（模拟数据）**： [https://artex-demo.mhtsec.com](https://artex-demo.mhtsec.com)
-
-📦 **原 ARTEX 项目已停止维护。ARTEX-P 基于原项目最后源码版本，作为我们自用的分支继续维护，按实际使用需求修复问题、完善功能。当前维护包括代理中心、多模型、WARP、任务续做及一键更新。镜像发布到 [GitHub Packages](https://github.com/moeacgx/ARTEX-P/pkgs/container/artex)，安装包发布到 [Releases](https://github.com/moeacgx/ARTEX-P/releases)，页面一键更新使用本仓库发布源。**
+[容器镜像](https://github.com/moeacgx/ARTEX-P/pkgs/container/artex-p) · [安装包](https://github.com/moeacgx/ARTEX-P/releases) · [原项目 Demo（模拟数据）](https://artex-demo.mhtsec.com)
 
 </div>
 
 ---
 
-## 项目来源与维护说明
+## 项目简介
 
 本项目源自 [ARTEX 源码备份](https://github.com/mhtsec/ARTEX)。感谢原作者及贡献者的工作，原有版权与许可证声明继续保留。
 
-ARTEX-P 是独立的自用维护分支，并非原作者的官方续作。后续维护以我们的实际使用需求为主，安装包、容器镜像和一键更新由本仓库发布。下方截图及演示链接来自原项目，仅供参考。
+原 ARTEX 项目已停止维护。ARTEX-P 是基于其最后源码版本的自用维护分支，并非原作者的官方续作；后续更新围绕我们的实际使用需求。原有版权与许可证声明继续保留。下方截图和 Demo 来自原项目，仅供参考。
 
-## 本分支主要更新
+## ✨ 当前功能
 
-### 已完成任务继续执行：主 Agent → Planner → Worker
+- 🧠 **任务续做**：已完成任务收到追加执行要求后，先取消完成状态，再恢复运行或排队；保留原任务和历史成果。
+- 🧭 **重新规划**：主 Agent 或 Auto 添加意图、目标或方向后，唤醒 Planner 规划、Worker 执行；验收后再次完成。普通问答不会重启任务。
+- 🔌 **代理中心**：集中管理 HTTP、HTTPS、SOCKS5、Resin 和 WARP；任务可选继承、直连或固定代理，空闲时可切换。
+- 🌐 **一键 WARP**：输入名称即可添加并连接，展示在线出口 IP；同一创建意图重复请求不会再次注册。
+- 🔍 **探测出口**：任务工具及后台资产探测走任务出口，模型调用按任务与渠道的优先级选路；不可用时明确失败。
+- 🛠️ **Agent 代理工具**：按权限查询、批量添加和检测已有代理，逐项返回结果；不开放新 WARP 注册。
+- 🤖 **多模型**：配置渠道、模型和故障转移；任务、对话及全局池可选择成员，渠道支持搜索代理中心档案。
+- 📦 **发布与更新**：提供跨平台安装包、双架构镜像和页面一键更新，支持持久化程序更新及失败回滚。
 
-任务完成后，仍可在**原任务对话**中给主 Agent 追加执行要求，例如“继续核验这条结果”或“按新的方向补充验证”。主 Agent 会登记新的意图、验收目标或战略提示，**先取消任务的已完成状态、清除完成时间，再恢复运行或进入并发队列**。
-
-```text
-追加执行要求 → 取消已完成 → 运行中／排队
-            → Planner 规划 → Worker 执行 → 验收追加目标 → 再次完成
-```
-
-- **重新激活规划**：追加方向和目标会唤醒 Planner，由其规划后续工作并交给 Worker；主 Agent 负责沟通和编排。
-- **Auto 也能续做原任务**：通过 `add_task_goal` 或 `add_task_hint` 给指定任务追加目标或方向，同样取消完成状态并启动后续规划，无需另建任务。
-- **保留历史成果**：任务 ID、已完成目标、旧意图和已有结果保持可追溯；新增工作有独立验收目标，验收后才再次完成。
-- **区分问答与执行**：解释已有结果的普通追问不会重启任务；明确要求继续执行才登记追加工作。
-- **遵守调度与恢复规则**：达到并发上限时排队；准入失败会保留已登记的工作 ID 并报告尚未执行，避免把登记成功当成执行完成。
-
-### 代理中心与任务出口
-
-- 集中管理 HTTP、HTTPS、SOCKS5、Resin 和 WARP 代理，渠道可通过搜索下拉选择代理中心档案，使用 ID 引用并脱敏展示。
-- 任务支持继承全局、明确直连或固定代理；继承在创建或重新保存时生成快照。任务真正空闲时可切换出口，版本校验和活动屏障防止覆盖在途操作。
-- 任务工具及后台资产探测使用任务出口，模型调用遵循任务与渠道的代理优先级；代理不可用时明确失败。原始 TCP、DNS 及忽略代理设置的命令不保证覆盖。
-- WARP 输入名称即可确认添加并连接，展示真实在线出口 IP；同一创建意图持久幂等，网络重试不会再次注册。删除自动处理停止和清理，仍受引用保护。
-- Agent 可通过 `list_proxies`、`add_proxies`、`test_proxies` 查询、批量添加和检测已有代理入口；逐项幂等、权限校验与脱敏回显。工具不开放新 WARP 注册。
-
-### 多模型与渠道配置
-
-- 支持渠道默认模型、固定模型，以及任务、对话和全局池的成员选择与故障转移。
-- 模型展示名与实际路由身份分开，同名模型不合并；编辑渠道时保留已存 API Key，避免误覆盖。
-- 渠道代理选择贯穿保存、测试连接、拉取模型及实际调用；代理配置变化后刷新运行缓存。新渠道固定 Resin 引用暂不支持。
-
-### 发布与一键更新
-
-- 本仓库发布五个平台安装包及校验文件，提供 Linux amd64／arm64 容器镜像。
-- 页面一键更新使用本仓库 Releases；Docker 内程序和内嵌前端更新持久保存在数据目录，包含启动确认和失败回滚。
-- Playwright、nmap 等工具链随镜像更新；程序在线更新与工具链更新的具体方式见下方“更新升级”。
+> 代理覆盖范围和渠道 Resin 限制见[更新升级](#更新升级)及代理配置文档；原始 TCP、DNS 和忽略代理设置的命令不保证走任务出口。
 
 ## 截图预览
 
@@ -132,11 +105,11 @@ cd ARTEX-P
 git clone https://github.com/moeacgx/ARTEX-P.git
 cd ARTEX-P
 cp .env.example .env          # 填 POSTGRES_PASSWORD、可选 ANTHROPIC_API_KEY
-docker compose up -d          # 拉取 ghcr.io/moeacgx/artex 镜像 + postgres
+docker compose up -d          # 拉取 ghcr.io/moeacgx/artex-p 镜像 + postgres
 # → http://localhost:8787
 ```
 
-> 镜像源为 **`ghcr.io/moeacgx/artex`**，支持 Linux amd64 / arm64；正式版本同时提供 `v2.2.1` 这样的固定标签和 `latest`。
+> 镜像源为 **`ghcr.io/moeacgx/artex-p`**，支持 Linux amd64 / arm64；正式版本同时提供固定版本标签和 `latest`。旧的 `ghcr.io/moeacgx/artex` 镜像保留历史版本；已有部署需将 Compose 的 `image` 改为新地址后再拉取。不要清理数据卷。
 > 镜像源不可用（或想自行改代码）时，本地从纯源码构建即可：`docker compose build && docker compose up -d`。
 > Dockerfile 为多阶段构建（前端静态导出 → Go 静态编译 → 运行镜像），默认走国内友好依赖源，可加 `--build-arg GOPROXY=... / --build-arg NPM_REGISTRY=...` 覆盖。
 
@@ -177,7 +150,7 @@ CGO_ENABLED=0 go build -tags embedui -o artex ./cmd/artex
 
 ```bash
 ./build.sh --release
-# 产物：dist/artex-2.2.1-*.zip
+# 产物：dist/artex-<版本>-*.zip
 ```
 
 UPX 自解压二进制可能与部分 Linux 内核、虚拟化环境或安全策略不兼容，因此默认不启用。可用 `ARTEX_TARGETS` 自定义目标；确认目标运行环境兼容时，可显式传入 `--upx` 进一步缩小二进制：
@@ -194,11 +167,11 @@ ARTEX_TARGETS=linux/amd64,windows/amd64 ./build.sh --release
 推送正式版本标签即可触发 `.github/workflows/release.yml`，无需 Docker Hub token：
 
 ```bash
-git tag v2.2.1
-git push origin v2.2.1
+git tag vX.Y.Z
+git push origin vX.Y.Z
 ```
 
-工作流先验证更新模块并导出非 Mock 前端，再生成 Linux amd64/arm64、macOS amd64/arm64 和 Windows amd64 五份 zip。镜像复用这些 Release 二进制，通过 `GITHUB_TOKEN` 发布 `ghcr.io/moeacgx/artex:v2.2.1` 与 `latest`。两种架构镜像均发布成功后，才发布带 `SHA256SUMS` 的正式 Release。版本标签仅接受 `v主版本.次版本.修订号`；不覆盖既有标签。
+工作流先验证更新模块并导出非 Mock 前端，再生成 Linux amd64/arm64、macOS amd64/arm64 和 Windows amd64 五份 zip。镜像复用这些 Release 二进制，通过 `GITHUB_TOKEN` 发布 `ghcr.io/moeacgx/artex-p` 的版本标签与 `latest`。两种架构镜像均发布成功后，才发布带 `SHA256SUMS` 的正式 Release。版本标签仅接受 `v主版本.次版本.修订号`；不覆盖既有标签。
 
 ## 更新升级
 
@@ -238,7 +211,7 @@ cd ARTEX-P
 ```bash
 cd ARTEX-P
 git pull                       # 更新 compose / 脚本（可选）
-# 指定版本：在 .env 设 ARTEX_TAG=v2.2.1；不设则用 latest
+# 指定版本：在 .env 设 ARTEX_TAG=v2.2.9；不设则用 latest
 docker compose pull artex
 docker compose up -d artex     # 换新镜像重启 → 自动迁移 schema
 docker image prune -f          # 清理旧镜像（可选）
