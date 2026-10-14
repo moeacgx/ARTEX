@@ -2,6 +2,7 @@ package harness
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"iter"
 	"strconv"
@@ -37,6 +38,9 @@ type QueryInput struct {
 	MaxTurns       int
 	MaxDuration    time.Duration
 	MaxConcurrency int
+	// 硬预算覆盖压缩、模型与工具，截止后不再调用模型收尾。零值不启用。
+	HardMaxDuration    time.Duration
+	HardCleanupTimeout time.Duration
 	// NonStreaming makes each model call a single non-streaming request (via
 	// QueryDeps.CallModelSync / Provider.Complete) instead of a token stream. The
 	// loop still emits the same KindText/KindThinking/KindToolUse/KindUsage events
@@ -364,6 +368,11 @@ func (l *loop) maxTokens() int {
 }
 
 func (l *loop) run() {
+	if l.in.HardMaxDuration > 0 {
+		var cancel context.CancelFunc
+		l.ctx, cancel = context.WithTimeoutCause(l.ctx, l.in.HardMaxDuration, ErrHardDeadlineExceeded)
+		defer cancel()
+	}
 	var schemas []llm.ToolSchema
 	if l.in.Tools != nil {
 		schemas = l.in.Tools.Schemas()
@@ -389,7 +398,7 @@ func (l *loop) run() {
 	iterations := 0
 	for {
 		if l.ctx.Err() != nil {
-			l.finish(ReasonAbortedStreaming, l.ctx.Err(), "")
+			l.finishCanceled(ReasonAbortedStreaming, nil)
 			return
 		}
 		// Defensive backstop against a pathological recovery/continuation loop.
@@ -406,6 +415,10 @@ func (l *loop) run() {
 			l.messages = l.in.Compactor.Pre(l.ctx, l.messages, l.lastInputTokens)
 			l.recordNewBoundary()
 		}
+		if l.ctx.Err() != nil {
+			l.finishCanceled(ReasonAbortedStreaming, nil)
+			return
+		}
 
 		usageBefore := l.usage
 		asst, exec, stopReason, streamErr, consumerStopped, aborted := l.streamAndExecute(schemas)
@@ -414,7 +427,7 @@ func (l *loop) run() {
 		}
 		if streamErr != nil {
 			if l.ctx.Err() != nil {
-				l.finish(ReasonAbortedStreaming, l.ctx.Err(), "")
+				l.finishCanceled(ReasonAbortedStreaming, streamErr)
 				return
 			}
 			// Reactive recovery from prompt-too-long: one forced AutoCompact, then retry.
@@ -521,7 +534,7 @@ func (l *loop) run() {
 		l.injectTaskNotifications()
 		// Parent-ctx cancellation (pause / planner kill / shutdown) → real abort, no wrap-up.
 		if l.ctx.Err() != nil {
-			l.finish(ReasonAbortedTools, l.ctx.Err(), "")
+			l.finishCanceled(ReasonAbortedTools, nil)
 			return
 		}
 		// aborted with the parent still alive ⇒ the run's own MaxDuration deadline (on
@@ -777,8 +790,16 @@ func (l *loop) requestMessages() []llm.Message {
 }
 
 func (l *loop) streamAndExecute(schemas []llm.ToolSchema) (asst llm.Message, exec *streamExec, stopReason string, err error, consumerStopped, aborted bool) {
+	defer func() {
+		if exec != nil && l.in.HardMaxDuration > 0 {
+			err = errors.Join(err, exec.closeAndWait(l.hardCleanupTimeout()))
+		}
+	}()
 	l.maybeInjectTodoReminder()
 	msgs := l.requestMessages()
+	if l.ctx.Err() != nil {
+		return asst, nil, "", context.Cause(l.ctx), false, false
+	}
 	if l.in.SystemReminder != "" {
 		msgs = append([]llm.Message{llm.UserText(l.in.SystemReminder)}, msgs...)
 	}
@@ -800,6 +821,10 @@ func (l *loop) streamAndExecute(schemas []llm.ToolSchema) (asst llm.Message, exe
 	var curID, curName string
 	var curInput strings.Builder
 	finalizeTool := func() bool { // false = consumer stopped
+		if l.ctx.Err() != nil {
+			building = false
+			return true
+		}
 		if !building {
 			return true
 		}
@@ -819,7 +844,12 @@ func (l *loop) streamAndExecute(schemas []llm.ToolSchema) (asst llm.Message, exe
 
 	for ev, e := range l.deps.CallModel(l.ctx, req) {
 		if e != nil {
+			exec.stopDispatch()
 			err = e
+			break
+		}
+		if l.ctx.Err() != nil {
+			err = context.Cause(l.ctx)
 			break
 		}
 		if ev.Type == llm.SEToolInputJSON {
@@ -846,7 +876,8 @@ func (l *loop) streamAndExecute(schemas []llm.ToolSchema) (asst llm.Message, exe
 		}
 		acc.Add(ev)
 	}
-	if !finalizeTool() {
+	// 流出错时最后一个工具块可能不完整，禁止补齐并派发。
+	if err == nil && !finalizeTool() {
 		return asst, exec, "", nil, true, false
 	}
 	l.usage.Add(acc.Usage)
@@ -876,10 +907,16 @@ func (l *loop) completeAndExecute(req llm.CompletionRequest) (asst llm.Message, 
 	if cerr != nil {
 		return asst, exec, "", cerr, false, false
 	}
+	if l.ctx.Err() != nil {
+		return asst, exec, "", context.Cause(l.ctx), false, false
+	}
 	l.usage.Add(usage)
 	asst = msg
 	stopReason = sr
 	for _, b := range msg.Content {
+		if l.ctx.Err() != nil {
+			return asst, exec, stopReason, context.Cause(l.ctx), false, false
+		}
 		switch b.Type {
 		case llm.BlockThinking:
 			if b.Thinking != "" && !l.emit(Event{Kind: KindThinking, Text: b.Thinking}) {

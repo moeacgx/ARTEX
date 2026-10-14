@@ -325,11 +325,20 @@ func (e *Engine) settleTask(ctx context.Context, t *Task) {
 // task-timeout planner words (final goal judgment; no new intents). Waits for the
 // LLM to be ready (bounded by ctx) so a completable task isn't mis-judged timeout.
 func (e *Engine) runFinalPlannerRound(ctx context.Context, t *Task) (met bool) {
+	plannerExited := e.beginPlannerRun(t.ID, true)
+	if plannerExited == nil {
+		return false
+	}
+	var plannerErr error
+	finishOperation := func() {}
+	defer func() {
+		finishPlannerRun(t.ID, plannerErr, finishOperation, plannerExited)
+	}()
 	opCtx, finish, admitted := e.beginTaskOperationContext(ctx, t.ID)
 	if !admitted {
 		return false
 	}
-	defer finish()
+	finishOperation = finish
 	planner, _ := e.snapshotFor(t, opCtx)
 	for planner == nil {
 		if sleepCtx(ctx, deadlinePollInterval) {
@@ -351,6 +360,7 @@ func (e *Engine) runFinalPlannerRound(ctx context.Context, t *Task) (met bool) {
 	tTaskID, _ := strconv.ParseInt(t.ID, 10, 64)
 	e.BeginLLMCall(t.ID)
 	met, reason, err := planner.Plan(fctx, tTaskID, e.m.assets, t.Store, t.Goal, t.drainTriggers(), emit)
+	plannerErr = err
 	e.EndLLMCall(t.ID)
 	if err != nil {
 		log.Printf("[deadline] task %s 终局规划出错: %v", t.ID, err)

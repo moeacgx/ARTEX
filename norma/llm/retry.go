@@ -3,6 +3,7 @@ package llm
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -12,7 +13,7 @@ import (
 
 // doStream sends the streaming request with retries on transient failures and
 // returns a 200 response (caller reads + closes the body). Only the request
-// establishment phase is retried — connection reset / timeout / 429 / 5xx before
+// establishment phase is retried — connection reset / 429 / 5xx before
 // any stream data is consumed — so retrying is safe (it can't duplicate
 // partially-streamed assistant output). A mid-stream drop is the caller's to
 // surface. Context cancellation is never retried and interrupts the backoff.
@@ -40,7 +41,7 @@ func doStream(ctx context.Context, cfg Config, url string, body []byte, setHeade
 		retryable := false
 		switch {
 		case err != nil:
-			retryable = ctx.Err() == nil // transient network error (not cancellation)
+			retryable = ctx.Err() == nil && !IsRequestTimeout(err)
 		case isRetryableStatus(resp.StatusCode):
 			retryable = true
 		}
@@ -48,8 +49,11 @@ func doStream(ctx context.Context, cfg Config, url string, body []byte, setHeade
 			if err != nil {
 				return nil, err
 			}
-			data, _ := io.ReadAll(resp.Body)
+			data, readErr := io.ReadAll(resp.Body)
 			resp.Body.Close()
+			if readErr != nil {
+				return nil, readErr
+			}
 			return nil, fmt.Errorf("%s: status %d: %s", errPrefix, resp.StatusCode, strings.TrimSpace(string(data)))
 		}
 		if resp != nil {
@@ -59,6 +63,15 @@ func doStream(ctx context.Context, cfg Config, url string, body []byte, setHeade
 			return nil, ctx.Err() // context cancelled during backoff
 		}
 	}
+}
+
+// 超时请求可能已经到达上游，不能因为尚未收到输出就原样重放。
+func IsRequestTimeout(err error) bool {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var timeout interface{ Timeout() bool }
+	return errors.As(err, &timeout) && timeout.Timeout()
 }
 
 func isRetryableStatus(code int) bool {

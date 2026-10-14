@@ -82,9 +82,11 @@ func (c *Compactor) OnPlannerRound(ctx context.Context, ts *db.ExplorationStore)
 	if !c.tryStart(ts.ID()) {
 		return // already running, or within cooldown —派生态最终一致，下轮再压
 	}
+	background, exited := compactionBackground(ctx)
 	go func() {
+		defer exited()
 		defer c.finish(ts.ID())
-		bg, cancel := context.WithTimeout(context.WithoutCancel(ctx), c.maxDur)
+		bg, cancel := context.WithTimeout(background, c.maxDur)
 		defer cancel()
 		// 压缩是裸 provider 调用（compress 里直接 prov.Complete），不经过 agentcore
 		// 的会话循环，所以 ctx 上没有 session id；按 session-id 头做提示缓存/粘性

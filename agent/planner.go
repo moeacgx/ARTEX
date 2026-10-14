@@ -3,13 +3,17 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/Autumn-27/artex/db"
 	"github.com/Autumn-27/artex/intercept"
 	"github.com/Autumn-27/norma/agentcore"
+	"github.com/Autumn-27/norma/harness"
 	"github.com/Autumn-27/norma/llm"
 	"github.com/Autumn-27/norma/permission"
 	actool "github.com/Autumn-27/norma/tool"
@@ -355,6 +359,32 @@ func plannerSystem(goal, dataDir, workDir string) string {
 // for time/heartbeat wakes). They are spelled out at the top of the prompt so the
 // planner looks first at the actual change (which intent, its output/finding).
 func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts *db.ExplorationStore, goal string, triggers []TriggerEvent, emit func(db.Activity)) (met bool, reason string, err error) {
+	// 从 Plan 入口计时，覆盖工具装配及 Compactor.Pre，任务较短截止优先。
+	maxDur, clamped := plannerRoundDuration(taskClockFrom(ctx).DeadlineUnix)
+	ctx, cancel := context.WithTimeoutCause(ctx, maxDur, harness.ErrHardDeadlineExceeded)
+	defer cancel()
+	return waitPlannerRound(ctx, plannerCleanupTimeout, func() (bool, string, error) {
+		return p.plan(ctx, maxDur, clamped, taskID, as, ts, goal, triggers, emit)
+	})
+}
+
+func (p *Planner) plan(ctx context.Context, maxDur time.Duration, clamped bool, taskID int64, as *db.AssetStore, ts *db.ExplorationStore, goal string, triggers []TriggerEvent, emit func(db.Activity)) (met bool, reason string, err error) {
+	if ctx.Err() != nil {
+		return false, "", context.Cause(ctx)
+	}
+	var cleanupFailed atomic.Bool
+	defer func() {
+		if cleanupFailed.Load() {
+			err = errors.Join(err, ErrPlannerCleanup)
+		}
+	}()
+	parentCleanupCtx := ctx
+	ctx = WithBrowserCleanupFailure(ctx, func() {
+		cleanupFailed.Store(true)
+		reportBrowserCleanupFailure(parentCleanupCtx)
+	})
+	ctx, background := withPlannerBackground(ctx)
+	defer background.wg.Wait() // 外层有界等待；超限保持操作引用，不认定真退出。
 	// cold-digest §2.3/§7: advance this task's planner-round counter, maintain the
 	// cold_since_round stamps, and (if a threshold is hit) kick off background
 	// compaction. Synchronous part is cheap (a few queries); the LLM compaction
@@ -377,7 +407,9 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 	base := append(tsx.DropCoverageTools(tsx.PlannerTools()), actool.DefaultTools()...)
 	ctx = WithRunInfo(ctx, RunInfo{TaskID: taskID, ExplorationID: explorationID(ts)})
 	tools, def, cleanup := AugmentTools(ctx, "planner", base)
-	defer cleanup()
+	defer func() {
+		err = errors.Join(err, plannerCleanup(ctx, func() error { cleanup(); return nil }))
+	}()
 	// 关键态势（刚完成的意图 + 预取的完整图）改放【本轮 user 输入】(见下方 input)，system
 	// 只留静态规划正文。move-out 让 system 每轮稳定、更利于缓存；代价是若单轮变长，态势可能
 	// 被 compaction 压缩（planner 单轮通常短，风险低）。situational 会拼进下方 input。
@@ -397,9 +429,7 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 		sysBody += constraintBlock(ts) // 操作约束(若有)注入系统提示,框定探索边界
 	}
 	system, boundary := deferredSystem(sysBody, def)
-	// planner 无自身墙钟预算;有 deadline 时把 MaxDuration 夹逼到剩余,让在跑的规划轮在
-	// 任务到点时进收尾(因超时→任务超时词,因步数→per-run 词)。
-	maxDur, clamped := clampMaxDuration(tc.DeadlineUnix, 0)
+	// 步数预算仍可收尾；墙钟硬截止取消整轮，不再发出新模型请求或派发工具。
 	settle := wrapupSettlement("planner", nil)
 	if tc.DeadlineUnix > 0 {
 		settle = wrapupSettlementForTask("planner", nil, clamped)
@@ -430,7 +460,8 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 		WorkingDir:            taskDir, // 本任务工作目录 <workDir>/tasks/<taskID>
 		ToolOutputDir:         cmdOutDir(taskDir),
 		MaxTurns:              p.maxTurns, // 0 = unlimited (configurable in agent management)
-		MaxDuration:           maxDur,     // 0=不限;有 deadline 时=距 deadline 剩余
+		HardMaxDuration:       maxDur,
+		HardCleanupTimeout:    plannerCleanupTimeout,
 		Compaction:            compactionConfig(p.compactionWindow()),
 		// 跨唤醒共享的规划待办：让串行链在多轮之间保留（session 是新的，store 不是）。
 		Todos: p.todoFor(ts.ID()),
@@ -463,11 +494,15 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 	}
 	input := lead + situational + "\n\n据上面的态势，判定目标。目标已【真正达成】（已拿到目标成果/已确认目标漏洞）时用 prove_goal 逐个标记。**硬底线：只要目标尚未达成、且当前没有任何 open 或 running 意图（frontier_open=0 且 running_intents 为空），本轮就必须产出至少一个向目标推进的意图——此时没有在跑的 work 可等、也没有在排队的方向，产出 0 意图=任务停摆。仅当已有 open/running 意图在推进、或目标已达成时，本轮才可以不产出新意图。**" +
 		renderPlannerTodos(opts.Todos.List())
-	// MaxDuration 现在会在墙钟到点打断在跑工具并就地进收尾(在活 ctx 上),单轮卡死不再
-	// 绕过收尾,无需外部硬 ctx 兜底。ctx 只承载 pause / kill / shutdown。
 	opts.BashEnv = browserRunEnvironment(opts.BashEnv)
 	defer closeRunBrowser(ctx, opts.WorkingDir, opts.BashEnv)
-	_, _, err = captureRun(ctx, opts, input,
+	session := agentcore.NewSession(opts)
+	defer func() {
+		// 外层已提供有界返回；内层必须等工具真退出，避免并发关闭其共享资源。
+		_ = harness.WaitForToolExit(context.Background(), err)
+		err = errors.Join(err, plannerCleanup(ctx, func() error { return session.CloseAndWait(context.Background()) }))
+	}()
+	_, _, err = captureRunSession(ctx, session, input,
 		func(r db.Activity) {
 			if emit != nil {
 				r.Worker = "planner" // planner activity has no intent_id (it generates them)

@@ -123,6 +123,11 @@ func (s *Server) admitTaskWhen(t *Task, mode string, requirePaused bool) (queued
 	if !exists || current != t || s.engine.IsDeleting(t.ID) {
 		return false, fmt.Errorf("task is being deleted")
 	}
+	if lifecycle := t.lifecycleSnapshot(); lifecycle.Paused || s.engine.IsPaused(t.ID) || isTerminalStatus(lifecycle.Status) {
+		if err := s.engine.plannerResumeError(t.ID); err != nil {
+			return false, err
+		}
+	}
 	if err := s.engine.beginTaskOperationError(context.Background(), t.ID); err != nil {
 		return false, err
 	}

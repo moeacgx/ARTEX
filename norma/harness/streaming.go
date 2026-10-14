@@ -1,6 +1,7 @@
 package harness
 
 import (
+	"context"
 	"sync"
 
 	"github.com/Autumn-27/norma/llm"
@@ -18,6 +19,10 @@ type streamExec struct {
 	mu     sync.Mutex
 	tools  []*tracked
 	notify chan struct{} // pinged when a tool completes or emits progress
+	ctx    context.Context
+	cancel context.CancelFunc
+	wg     sync.WaitGroup
+	closed bool
 }
 
 type toolStatus int
@@ -39,7 +44,8 @@ type tracked struct {
 }
 
 func newStreamExec(l *loop) *streamExec {
-	return &streamExec{l: l, notify: make(chan struct{}, 1)}
+	ctx, cancel := context.WithCancel(l.toolCtx)
+	return &streamExec{l: l, notify: make(chan struct{}, 1), ctx: ctx, cancel: cancel}
 }
 
 func (e *streamExec) ping() {
@@ -75,6 +81,10 @@ func (e *streamExec) canStartLocked(safe bool) bool {
 // tool that cannot start blocks the tools behind it.
 func (e *streamExec) processQueue() {
 	e.mu.Lock()
+	if e.closed || e.ctx.Err() != nil {
+		e.mu.Unlock()
+		return
+	}
 	var start []*tracked
 	for _, t := range e.tools {
 		if t.status != stQueued {
@@ -82,6 +92,7 @@ func (e *streamExec) processQueue() {
 		}
 		if e.canStartLocked(t.safe) {
 			t.status = stExecuting
+			e.wg.Add(1)
 			start = append(start, t)
 		} else if !t.safe {
 			break
@@ -94,9 +105,14 @@ func (e *streamExec) processQueue() {
 }
 
 func (e *streamExec) run(t *tracked) {
-	e.l.sem <- struct{}{} // bound concurrent tool execution
+	defer e.wg.Done()
+	select {
+	case e.l.sem <- struct{}{}:
+	case <-e.ctx.Done():
+		return
+	}
 	defer func() { <-e.l.sem }()
-	res, extra := e.l.execOne(t.block, func(p tool.ProgressInfo) {
+	res, extra := e.l.execOneContext(e.ctx, t.block, func(p tool.ProgressInfo) {
 		e.mu.Lock()
 		t.prog = append(t.prog, p.Message)
 		e.mu.Unlock()
@@ -159,6 +175,9 @@ func (e *streamExec) pending() bool {
 // finish drains to completion. It returns (consumerStopped, aborted): on context
 // cancellation it synthesizes interrupted results for unfinished tools.
 func (e *streamExec) finish() (consumerStopped, aborted bool) {
+	if e.l.in.HardMaxDuration <= 0 {
+		defer e.cancel()
+	}
 	for {
 		if !e.drain() {
 			return true, false

@@ -1,6 +1,7 @@
 package harness
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 
@@ -26,6 +27,17 @@ func acceptsRawInput(t tool.CoreTool) bool {
 // executor's goroutines (read-only access to loop config; permission/hook
 // callbacks are the host's responsibility to make safe).
 func (l *loop) execOne(use llm.ContentBlock, emitProgress func(tool.ProgressInfo)) (llm.ContentBlock, []llm.Message) {
+	ctx := l.toolCtx
+	if ctx == nil {
+		ctx = l.ctx
+	}
+	return l.execOneContext(ctx, use, emitProgress)
+}
+
+func (l *loop) execOneContext(ctx context.Context, use llm.ContentBlock, emitProgress func(tool.ProgressInfo)) (llm.ContentBlock, []llm.Message) {
+	if err := ctx.Err(); err != nil {
+		return llm.ToolResultText(use.ID, "工具尚未执行即被取消", true), nil
+	}
 	t, ok := l.in.Tools.Get(use.Name)
 	if !ok {
 		return llm.ToolResultText(use.ID, fmt.Sprintf("Error: unknown tool %q", use.Name), true), nil
@@ -54,11 +66,11 @@ func (l *loop) execOne(use llm.ContentBlock, emitProgress func(tool.ProgressInfo
 		Allowed:    l.in.Allowed,
 		Disallowed: l.in.Disallowed,
 	}
-	dec := permission.Evaluate(l.ctx, permission.Request{
+	dec := permission.Evaluate(ctx, permission.Request{
 		ToolName:     use.Name,
 		Input:        input,
 		IsReadOnly:   t.IsReadOnly(input),
-		ToolDecision: t.CheckPermissions(l.ctx, input, pc),
+		ToolDecision: t.CheckPermissions(ctx, input, pc),
 		Ctx:          pc,
 		Ask:          l.in.CanUseTool,
 	})
@@ -75,7 +87,7 @@ func (l *loop) execOne(use llm.ContentBlock, emitProgress func(tool.ProgressInfo
 
 	// Pre-tool hook.
 	if l.in.Hooks != nil {
-		if block, msg, updated := l.in.Hooks.PreToolUse(l.ctx, use.Name, input); block {
+		if block, msg, updated := l.in.Hooks.PreToolUse(ctx, use.Name, input); block {
 			return llm.ToolResultText(use.ID, "Blocked by hook: "+msg, true), nil
 		} else if len(updated) > 0 {
 			input = updated
@@ -92,13 +104,15 @@ func (l *loop) execOne(use llm.ContentBlock, emitProgress func(tool.ProgressInfo
 		Tasks:          l.in.Tasks,
 		Env:            l.in.BashEnv,
 	}
-	// toolCtx carries the run's MaxDuration deadline, so a tool that overruns the
-	// wall-clock budget is interrupted here (the turn loop then enters wrap-up). During
-	// the wrap-up phase toolCtx is the live parent ctx, so settlement tools run freely.
-	if err := tool.CheckOperationAdmission(l.toolCtx, use.Name); err != nil {
+	// ctx carries the run's hard deadline and the formally admitted proxy subject.
+	// The same context must guard cancellation, policy revalidation, and execution.
+	if err := ctx.Err(); err != nil {
+		return llm.ToolResultText(use.ID, "工具尚未执行即被取消", true), nil
+	}
+	if err := tool.CheckOperationAdmission(ctx, use.Name); err != nil {
 		return llm.ToolResultText(use.ID, "操作准入失败，当前出口策略已不可用", true), nil
 	}
-	res, err := t.Call(l.toolCtx, input, tc)
+	res, err := t.Call(ctx, input, tc)
 	if err != nil {
 		res = tool.Errorf("Error: " + err.Error())
 	}
@@ -112,7 +126,7 @@ func (l *loop) execOne(use llm.ContentBlock, emitProgress func(tool.ProgressInfo
 
 	if l.in.Hooks != nil {
 		raw, _ := json.Marshal(res.Flatten())
-		l.in.Hooks.PostToolUse(l.ctx, use.Name, input, raw, res.IsError)
+		l.in.Hooks.PostToolUse(ctx, use.Name, input, raw, res.IsError)
 	}
 
 	content := res.Content

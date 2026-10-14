@@ -134,7 +134,9 @@ type Engine struct {
 	steerMu  sync.Mutex
 	steerBox map[int64][]string
 
-	plannerRound sync.Map // taskID -> int, planner round counter (for UI round separators)
+	plannerRound sync.Map   // taskID -> int, planner round counter (for UI round separators)
+	plannerRuns  sync.Map   // taskID -> *atomic.Int64，旧 Planner 实际退出保护
+	plannerRunMu sync.Mutex // Planner 轮准入与解除暂停串行，避免空唤醒占住恢复入口。
 
 	// 任务级超时(见 docs/任务级超时与收尾设计.md):
 	settling      sync.Map // taskID -> bool, 任务已进入收尾时序(停止派/领新意图)
@@ -284,6 +286,7 @@ func (e *Engine) StopTask(taskID string) {
 	e.paused.Delete(taskID)
 	e.dropCnt.Delete(taskID)
 	e.plannerRound.Delete(taskID)
+	e.plannerRuns.Delete(taskID)
 	e.settling.Delete(taskID)
 	e.deadline.Delete(taskID)
 	e.stamped.Delete(taskID)
@@ -317,6 +320,11 @@ func (e *Engine) Resume(t *Task) {
 	e.deleteMu.RLock()
 	defer e.deleteMu.RUnlock()
 	if e.IsDeleting(t.ID) {
+		return
+	}
+	e.plannerRunMu.Lock()
+	defer e.plannerRunMu.Unlock()
+	if e.plannerResumeError(t.ID) != nil {
 		return
 	}
 	e.paused.Delete(t.ID)
@@ -834,11 +842,20 @@ func (e *Engine) plannerLoop(ctx context.Context, t *Task) {
 
 	// runRound 跑一轮规划(含 debounce 合并 + 各 guard)。src 仅用于日志区分触发来源。
 	runRound := func(src string) {
+		plannerExited := e.beginPlannerRun(t.ID)
+		if plannerExited == nil {
+			return
+		}
+		var plannerErr error
+		finishOperation := func() {}
+		defer func() {
+			finishPlannerRun(t.ID, plannerErr, finishOperation, plannerExited)
+		}()
 		opCtx, finish, admitted := e.beginTaskOperationContext(e.execContextFor(ctx, t.ID), t.ID)
 		if !admitted {
 			return
 		}
-		defer finish()
+		finishOperation = finish
 		// debounce: coalesce a burst of changes into one planning round
 		timer := time.NewTimer(e.debounce)
 	drain:
@@ -906,6 +923,7 @@ func (e *Engine) plannerLoop(ctx context.Context, t *Task) {
 		taskIDInt, _ := strconv.ParseInt(t.ID, 10, 64)
 		e.BeginLLMCall(t.ID)
 		met, reason, err := planner.Plan(ectx, taskIDInt, e.m.assets, t.Store, t.Goal, triggers, emit)
+		plannerErr = err
 		e.EndLLMCall(t.ID)
 		switch {
 		case err != nil && ectx.Err() == nil:

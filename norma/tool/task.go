@@ -265,10 +265,12 @@ func (m *Manager) Spawn(spec SpawnSpec) (*Task, error) {
 
 func (m *Manager) watch(t *Task, f *os.File) {
 	stop := make(chan struct{})
-	go m.watchSize(t, stop)
+	sizeDone := make(chan struct{})
+	go func() { defer close(sizeDone); m.watchSize(t, stop) }()
 
 	err := t.cmd.Wait()
 	close(stop)
+	<-sizeDone
 	_ = f.Close()
 
 	m.mu.Lock()
@@ -285,12 +287,12 @@ func (m *Manager) watch(t *Task, f *os.File) {
 		}
 	}
 	t.EndTime = time.Now()
-	close(t.done)
 	if t.backgrounded && !t.notified && (t.Status == TaskCompleted || t.Status == TaskFailed) {
 		t.notified = true
 		m.pending = append(m.pending, m.notifFor(t))
 	}
 	m.mu.Unlock()
+	close(t.done) // output file与状态全部收尾后，才对严格清理方宣告真退出。
 }
 
 // watchSize terminates a task whose output file grows past the cap.

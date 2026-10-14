@@ -149,6 +149,9 @@ type Options struct {
 	// MaxDuration bounds wall-clock run time, checked at the turn boundary (never
 	// mid-stream), so a run ends cleanly rather than being aborted in flight (0 = off).
 	MaxDuration time.Duration
+	// 硬预算用于必须有限退出的规划轮；覆盖压缩、模型和工具且不触发收尾重放。
+	HardMaxDuration    time.Duration
+	HardCleanupTimeout time.Duration
 	// Settlement, when set with a Prompt, runs a bounded wrap-up phase when a budget
 	// (MaxTurns/MaxDuration) is hit — injecting the prompt and hiding DisabledTools —
 	// so a budget-terminated run checkpoints its findings. See harness.Settlement.
@@ -348,6 +351,18 @@ func (s *Session) Close() error {
 	return nil
 }
 
+// CloseAndWait 在有界清理上下文内等待后台进程真退出，仅由严格宿主显式调用。
+func (s *Session) CloseAndWait(ctx context.Context) error {
+	if s.tasks == nil {
+		return nil
+	}
+	if err := s.tasks.CleanupAndWait(ctx); err != nil {
+		return err
+	}
+	s.tasks = nil
+	return nil
+}
+
 // Messages returns the conversation history.
 func (s *Session) Messages() []llm.Message { return s.messages }
 
@@ -500,6 +515,8 @@ func (s *Session) Prompt(ctx context.Context, input string) iter.Seq2[harness.Ev
 		Temperature:        s.opts.Temperature,
 		MaxTurns:           s.opts.MaxTurns,
 		MaxDuration:        s.opts.MaxDuration,
+		HardMaxDuration:    s.opts.HardMaxDuration,
+		HardCleanupTimeout: s.opts.HardCleanupTimeout,
 		Settlement:         s.opts.Settlement,
 		MaxConcurrency:     s.opts.MaxConcurrency,
 		WorkingDir:         s.opts.WorkingDir,
