@@ -2,11 +2,63 @@ package tool
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
 	"time"
 )
+
+func syntheticPTYManager(t *testing.T) (*Manager, *ptySession) {
+	t.Helper()
+	dir := filepath.Join(t.TempDir(), "session", "tasks")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	s := &ptySession{id: "sh_test", state: "running", lastOut: time.Now(), done: make(chan struct{}), notifyCh: make(chan struct{}, 1)}
+	m := &Manager{tasks: map[string]*Task{}, dir: dir, rootCtx: ctx, rootCancel: cancel, sessions: map[string]*ptySession{s.id: s}}
+	return m, s
+}
+
+func assertStrictCleanupTracksRetiredPTY(t *testing.T, retire func(*Manager, *ptySession)) {
+	t.Helper()
+	m, session := syntheticPTYManager(t)
+	retire(m, session)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	if err := m.CleanupAndWait(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("strict cleanup treated kill request as exit: %v", err)
+	}
+	close(session.done)
+	if err := m.CleanupAndWait(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestStrictCleanupTracksShellCloseUntilPTYExit(t *testing.T) {
+	assertStrictCleanupTracksRetiredPTY(t, func(m *Manager, session *ptySession) {
+		input, _ := json.Marshal(map[string]string{"session_id": session.id})
+		result, err := NewShellClose().Call(context.Background(), input, &ToolContext{Tasks: m})
+		if err != nil || result.IsError {
+			t.Fatalf("shell_close failed: result=%s err=%v", result.Flatten(), err)
+		}
+	})
+}
+
+func TestStrictCleanupTracksReapedPTYUntilExit(t *testing.T) {
+	assertStrictCleanupTracksRetiredPTY(t, func(m *Manager, session *ptySession) {
+		session.lastOut = time.Now().Add(-time.Duration(sessDefIdleMs+1000) * time.Millisecond)
+		m.reapSessions()
+	})
+}
+
+func TestStrictCleanupTracksCloseAllPTYUntilExit(t *testing.T) {
+	assertStrictCleanupTracksRetiredPTY(t, func(m *Manager, _ *ptySession) { m.closeAllSessions() })
+}
 
 // TestShellToolsJSONSessionID drives the tools via their JSON input (snake_case
 // session_id) to guard against missing json tags — without tags session_id never

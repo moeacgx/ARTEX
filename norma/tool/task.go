@@ -159,9 +159,10 @@ type Manager struct {
 	// interactive PTY shell sessions (see shell_session.go). Separate map + mutex
 	// from the file-based tasks above: sessions are persistent, stdin-driven, and
 	// keep an in-memory ring buffer rather than streaming to a file.
-	sessMu   sync.Mutex
-	sessions map[string]*ptySession
-	sessSeq  int
+	sessMu          sync.Mutex
+	sessions        map[string]*ptySession
+	retiredSessions map[*ptySession]struct{} // kill 已发出但 cmd.Wait/done 尚未确认的会话
+	sessSeq         int
 }
 
 func baseTaskDir() string { return filepath.Join(os.TempDir(), "norma") }
@@ -179,11 +180,12 @@ func NewManager(sessionID string) (*Manager, error) {
 	cleanStaleSessions(baseTaskDir(), sessionID)
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Manager{
-		tasks:      map[string]*Task{},
-		sessions:   map[string]*ptySession{},
-		dir:        dir,
-		rootCtx:    ctx,
-		rootCancel: cancel,
+		tasks:           map[string]*Task{},
+		sessions:        map[string]*ptySession{},
+		retiredSessions: map[*ptySession]struct{}{},
+		dir:             dir,
+		rootCtx:         ctx,
+		rootCancel:      cancel,
 	}, nil
 }
 

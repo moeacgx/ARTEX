@@ -17,26 +17,67 @@ type plannerExitPending struct{ done <-chan error }
 
 func (e *plannerExitPending) Error() string { return ErrPlannerCleanup.Error() }
 func (e *plannerExitPending) Unwrap() error { return ErrPlannerCleanup }
-
-func HasPendingPlannerExit(err error) bool {
-	var pending *plannerExitPending
-	return errors.As(err, &pending)
-}
-
-func AwaitPlannerExit(ctx context.Context, err error) error {
-	var pending *plannerExitPending
-	if !errors.As(err, &pending) {
-		return err
-	}
+func (e *plannerExitPending) WaitPlannerExit(ctx context.Context) error {
 	select {
-	case finalErr, ok := <-pending.done:
+	case finalErr, ok := <-e.done:
 		if !ok {
 			return nil
 		}
-		return AwaitPlannerExit(ctx, finalErr)
+		return finalErr
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
+
+// PlannerExitWaiter 是跨包退出等待协议，服务端借此等待 errors.Join 树中的每个清理分支。
+type PlannerExitWaiter interface {
+	error
+	WaitPlannerExit(context.Context) error
+}
+
+func HasPendingPlannerExit(err error) bool {
+	if err == nil {
+		return false
+	}
+	if _, ok := err.(PlannerExitWaiter); ok {
+		return true
+	}
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		for _, child := range joined.Unwrap() {
+			if HasPendingPlannerExit(child) {
+				return true
+			}
+		}
+		return false
+	}
+	if child := errors.Unwrap(err); child != nil {
+		return HasPendingPlannerExit(child)
+	}
+	return false
+}
+
+func AwaitPlannerExit(ctx context.Context, err error) error {
+	return errors.Join(awaitPlannerExitTree(ctx, err)...)
+}
+
+func awaitPlannerExitTree(ctx context.Context, err error) []error {
+	if err == nil {
+		return nil
+	}
+	if pending, ok := err.(PlannerExitWaiter); ok {
+		return awaitPlannerExitTree(ctx, pending.WaitPlannerExit(ctx))
+	}
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		var resolved []error
+		for _, child := range joined.Unwrap() {
+			resolved = append(resolved, awaitPlannerExitTree(ctx, child)...)
+		}
+		return resolved
+	}
+	if child := errors.Unwrap(err); child != nil && HasPendingPlannerExit(child) {
+		return awaitPlannerExitTree(ctx, child)
+	}
+	return []error{err}
 }
 
 // 即使压缩器或模型没有响应取消，也有界返回明确清理失败。

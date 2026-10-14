@@ -66,8 +66,8 @@ func TestPlannerNonCooperativeRoundRetainsBarrier(t *testing.T) {
 	if !released.Swap(true) {
 		close(release)
 	}
-	if finalErr := AwaitPlannerExit(context.Background(), err); finalErr != nil {
-		t.Fatal(finalErr)
+	if finalErr := AwaitPlannerExit(context.Background(), err); !errors.Is(finalErr, harness.ErrHardDeadlineExceeded) {
+		t.Fatalf("resolved round lost original deadline: %v", finalErr)
 	}
 	select {
 	case <-exited:
@@ -96,5 +96,55 @@ func TestPlannerBackgroundSharesDeadlineAndRequiresExit(t *testing.T) {
 	case <-waited:
 	case <-time.After(time.Second):
 		t.Fatal("background exit not joined")
+	}
+}
+
+func TestAwaitPlannerExitWaitsEveryJoinedPending(t *testing.T) {
+	for _, first := range []int{0, 1} {
+		t.Run(map[int]string{0: "first_finishes_first", 1: "second_finishes_first"}[first], func(t *testing.T) {
+			waits := []chan error{make(chan error, 1), make(chan error, 1)}
+			err := errors.Join(context.DeadlineExceeded,
+				&plannerExitPending{done: waits[0]},
+				&plannerExitPending{done: waits[1]})
+			resolved := make(chan error, 1)
+			go func() { resolved <- AwaitPlannerExit(context.Background(), err) }()
+			waits[first] <- nil
+			select {
+			case got := <-resolved:
+				t.Fatalf("returned while another cleanup was live: %v", got)
+			case <-time.After(30 * time.Millisecond):
+			}
+			waits[1-first] <- nil
+			select {
+			case got := <-resolved:
+				if !errors.Is(got, context.DeadlineExceeded) {
+					t.Fatalf("resolved error lost round deadline: %v", got)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("joined planner cleanups did not resolve")
+			}
+		})
+	}
+}
+
+func TestAwaitPlannerExitWaitsAllBeforeReturningFailure(t *testing.T) {
+	first, second := make(chan error, 1), make(chan error, 1)
+	err := errors.Join(&plannerExitPending{done: first}, &plannerExitPending{done: second})
+	resolved := make(chan error, 1)
+	go func() { resolved <- AwaitPlannerExit(context.Background(), err) }()
+	first <- errors.Join(ErrPlannerCleanup, errors.New("MCP cleanup failed"))
+	select {
+	case got := <-resolved:
+		t.Fatalf("failure returned before the other cleanup exited: %v", got)
+	case <-time.After(30 * time.Millisecond):
+	}
+	second <- nil
+	select {
+	case got := <-resolved:
+		if !errors.Is(got, ErrPlannerCleanup) {
+			t.Fatalf("final cleanup failure was lost: %v", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("joined cleanup failure did not resolve")
 	}
 }

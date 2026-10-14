@@ -10,10 +10,12 @@ import (
 
 func finishPlannerRun(taskID string, plannerErr error, finishOperation, plannerExited func()) {
 	finish := func(finalErr error) {
-		finishOperation()
-		if !errors.Is(finalErr, agent.ErrPlannerCleanup) {
-			plannerExited()
+		if errors.Is(finalErr, agent.ErrPlannerCleanup) {
+			log.Printf("[planner] task %s 清理失败，保留 Planner 与操作占用: %v", taskID, finalErr)
+			return
 		}
+		plannerExited()
+		finishOperation()
 	}
 	if !agent.HasPendingPlannerExit(plannerErr) {
 		finish(plannerErr)
@@ -21,9 +23,6 @@ func finishPlannerRun(taskID string, plannerErr error, finishOperation, plannerE
 	}
 	go func() {
 		finalErr := agent.AwaitPlannerExit(context.Background(), plannerErr)
-		if finalErr != nil {
-			log.Printf("[planner] task %s 延迟清理失败，保留操作占用: %v", taskID, finalErr)
-		}
 		finish(finalErr)
 	}()
 }

@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"sort"
@@ -190,7 +191,14 @@ func (s *Server) admitTaskWhen(t *Task, mode string, requirePaused bool) (queued
 	if wasTerminal {
 		status = "running"
 	}
-	if err := s.m.ApplyTaskAdmission(t.ID, lifecycle.Status, status, shouldQueue, mode, wasQueued); err != nil {
+	applyAdmission := s.m.ApplyTaskAdmission
+	if requirePaused {
+		applyAdmission = s.m.ApplyTaskResumeAdmission
+	}
+	if err := applyAdmission(t.ID, lifecycle.Status, status, shouldQueue, mode, wasQueued); err != nil {
+		if errors.Is(err, db.ErrPlannerRunBusy) {
+			return false, errors.Join(ErrPlannerStillExiting, err)
+		}
 		if !engineWasPaused && !wasPaused && !wasQueued {
 			s.engine.Resume(t)
 		}

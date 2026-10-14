@@ -325,8 +325,11 @@ func (e *Engine) settleTask(ctx context.Context, t *Task) {
 // task-timeout planner words (final goal judgment; no new intents). Waits for the
 // LLM to be ready (bounded by ctx) so a completable task isn't mis-judged timeout.
 func (e *Engine) runFinalPlannerRound(ctx context.Context, t *Task) (met bool) {
-	plannerExited := e.beginPlannerRun(t.ID, true)
-	if plannerExited == nil {
+	plannerExited, runErr := e.beginPlannerRun(t.ID, true)
+	if runErr != nil {
+		if !errors.Is(runErr, db.ErrPlannerRunBusy) {
+			log.Printf("[deadline] task %s 终局 Planner 准入失败: %v", t.ID, runErr)
+		}
 		return false
 	}
 	var plannerErr error

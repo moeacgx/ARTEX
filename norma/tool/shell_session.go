@@ -65,7 +65,7 @@ type ptySession struct {
 	lastOut  time.Time
 	exitedAt time.Time
 
-	readCur  int64 // tool-side read cursor (shell_read without since_cursor continues here)
+	readCur  int64         // tool-side read cursor (shell_read without since_cursor continues here)
 	notifyCh chan struct{} // pinged on new output
 	done     chan struct{} // closed when the process exits
 }
@@ -245,12 +245,46 @@ func (m *Manager) reapSessions() {
 		if gone || stale {
 			kill = append(kill, s)
 			delete(m.sessions, id)
+			if m.retiredSessions == nil {
+				m.retiredSessions = map[*ptySession]struct{}{}
+			}
+			m.retiredSessions[s] = struct{}{}
 		}
 	}
 	m.sessMu.Unlock()
 	for _, s := range kill {
+		m.watchRetiredSession(s)
 		s.kill()
 	}
+}
+
+// retireSession 对 shell 工具隐藏已请求终止的会话，但保留 done 供严格清理等待。
+// 从活跃表删除会话并不能证明 cmd.Wait 已完成。
+func (m *Manager) retireSession(id string, s *ptySession) {
+	m.sessMu.Lock()
+	if current := m.sessions[id]; current == s {
+		delete(m.sessions, id)
+	}
+	if m.retiredSessions == nil {
+		m.retiredSessions = map[*ptySession]struct{}{}
+	}
+	_, tracked := m.retiredSessions[s]
+	if !tracked {
+		m.retiredSessions[s] = struct{}{}
+	}
+	m.sessMu.Unlock()
+	if !tracked {
+		m.watchRetiredSession(s)
+	}
+}
+
+func (m *Manager) watchRetiredSession(s *ptySession) {
+	go func() {
+		<-s.done
+		m.sessMu.Lock()
+		delete(m.retiredSessions, s)
+		m.sessMu.Unlock()
+	}()
 }
 
 func (s *ptySession) kill() {
@@ -269,12 +303,17 @@ func (s *ptySession) kill() {
 func (m *Manager) closeAllSessions() {
 	m.sessMu.Lock()
 	ss := make([]*ptySession, 0, len(m.sessions))
+	if m.retiredSessions == nil {
+		m.retiredSessions = map[*ptySession]struct{}{}
+	}
 	for _, s := range m.sessions {
 		ss = append(ss, s)
+		m.retiredSessions[s] = struct{}{}
 	}
 	m.sessions = map[string]*ptySession{}
 	m.sessMu.Unlock()
 	for _, s := range ss {
+		m.watchRetiredSession(s)
 		s.kill()
 	}
 }

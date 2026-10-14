@@ -148,10 +148,9 @@ func TestPlannerPGLateExitBlocksResumeAndReplansPersistedGraph(t *testing.T) {
 		t.Fatal(err)
 	}
 	release()
-	awaitPlannerState(t, "planner still busy after actual exit", func() bool { return s.engine.plannerResumeError(task.ID) == nil })
-	if count := plannerPersistentCount(t, m, task.ID); count != 0 {
-		t.Fatalf("exited planner count=%d", count)
-	}
+	awaitPlannerState(t, "planner still busy after actual exit", func() bool {
+		return s.engine.plannerResumeError(task.ID) == nil && plannerPersistentCount(t, m, task.ID) == 0
+	})
 	if _, err = s.applyTaskControl(task, "resume"); err != nil {
 		t.Fatal(err)
 	}
@@ -194,7 +193,10 @@ func TestPlannerPGCleanupFailureRetainsPersistentReference(t *testing.T) {
 	if !admitted {
 		t.Fatal("operation rejected")
 	}
-	plannerExited := e.beginPlannerRun(task.ID)
+	plannerExited, err := e.beginPlannerRun(task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
 	release := make(chan struct{})
 	var cleanupOnce sync.Once
 	closeCleanup := func() { cleanupOnce.Do(func() { close(release) }) }
@@ -214,8 +216,8 @@ func TestPlannerPGCleanupFailureRetainsPersistentReference(t *testing.T) {
 	if plannerPersistentCount(t, m, task.ID) != 1 {
 		t.Fatal("failed cleanup released persistent reference")
 	}
-	if e.beginPlannerRun(task.ID) != nil {
-		t.Fatal("new planner bypassed retained barrier")
+	if exit, err := e.beginPlannerRun(task.ID); exit != nil || !errors.Is(err, db.ErrPlannerRunBusy) {
+		t.Fatalf("new planner bypassed retained barrier: exit=%v err=%v", exit != nil, err)
 	}
 	if _, err := sResumeForCleanupTest(e, task); !errors.Is(err, ErrPlannerStillExiting) {
 		t.Fatalf("resume before cleanup exit=%v", err)

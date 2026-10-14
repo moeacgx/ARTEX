@@ -842,8 +842,11 @@ func (e *Engine) plannerLoop(ctx context.Context, t *Task) {
 
 	// runRound 跑一轮规划(含 debounce 合并 + 各 guard)。src 仅用于日志区分触发来源。
 	runRound := func(src string) {
-		plannerExited := e.beginPlannerRun(t.ID)
-		if plannerExited == nil {
+		plannerExited, runErr := e.beginPlannerRun(t.ID)
+		if runErr != nil {
+			if !errors.Is(runErr, db.ErrPlannerRunBusy) && !errors.Is(runErr, db.ErrPlannerRunPaused) {
+				log.Printf("[planner] task %s 规划轮准入失败: %v", t.ID, runErr)
+			}
 			return
 		}
 		var plannerErr error

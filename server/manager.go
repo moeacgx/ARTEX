@@ -1200,6 +1200,14 @@ func (m *Manager) SetTaskPaused(id string, paused bool) error {
 // admission keeps its FIFO timestamp; a task that was explicitly paused and is
 // now re-queued receives a fresh tail position.
 func (m *Manager) ApplyTaskAdmission(id, expectedStatus, status string, queued bool, mode string, preservePosition bool) error {
+	return m.applyTaskAdmission(id, expectedStatus, status, queued, mode, preservePosition, false)
+}
+
+func (m *Manager) ApplyTaskResumeAdmission(id, expectedStatus, status string, queued bool, mode string, preservePosition bool) error {
+	return m.applyTaskAdmission(id, expectedStatus, status, queued, mode, preservePosition, true)
+}
+
+func (m *Manager) applyTaskAdmission(id, expectedStatus, status string, queued bool, mode string, preservePosition, requirePlannerIdle bool) error {
 	m.taskStateMu.Lock()
 	defer m.taskStateMu.Unlock()
 	n, err := strconv.ParseInt(id, 10, 64)
@@ -1216,7 +1224,11 @@ func (m *Manager) ApplyTaskAdmission(id, expectedStatus, status string, queued b
 
 	var queuedAt, completedAt, firstRunAt, deadlineAt sql.NullTime
 	var committedMode string
-	err = m.pg.WithTaskProxyMutation(n, func(tx *sql.Tx) error {
+	mutation := m.pg.WithTaskProxyMutation
+	if requirePlannerIdle {
+		mutation = m.pg.WithPlannerIdleTaskMutation
+	}
+	err = mutation(n, func(tx *sql.Tx) error {
 		return tx.QueryRow(`UPDATE tasks
 	SET status=$2,
 	    completed_at=CASE
@@ -1295,11 +1307,13 @@ func (m *Manager) ApplyTaskPause(id string) error {
 		return err
 	}
 	var mode string
-	err = m.pg.QueryRow(`UPDATE tasks
+	err = m.pg.WithTaskProxyMutation(n, func(tx *sql.Tx) error {
+		return tx.QueryRow(`UPDATE tasks
 		SET paused=true, queued=false, queued_at=NULL
 		WHERE id=$1 AND deleted_at IS NULL AND paused=false
 		  AND status NOT IN ('done','failed','timeout')
 		RETURNING COALESCE(queue_mode,'')`, n).Scan(&mode)
+	})
 	if errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("task %s is unavailable for pause", id)
 	}

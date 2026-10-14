@@ -323,10 +323,8 @@ func NewShellClose() CoreTool {
 			return Errorf("会话不存在: " + a.SessionID), nil
 		}
 		ec := s.exit()
+		m.retireSession(a.SessionID, s)
 		s.kill()
-		m.sessMu.Lock()
-		delete(m.sessions, a.SessionID)
-		m.sessMu.Unlock()
 		return jsonResult(map[string]any{"closed": a.SessionID, "exit_code": exitOrNil(ec)})
 	})
 }

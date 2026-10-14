@@ -20,8 +20,15 @@ func (m *Manager) CleanupAndWait(ctx context.Context) error {
 	}
 	m.mu.Unlock()
 	m.sessMu.Lock()
-	var sessions []*ptySession
+	sessionSet := map[*ptySession]struct{}{}
 	for _, session := range m.sessions {
+		sessionSet[session] = struct{}{}
+	}
+	for session := range m.retiredSessions {
+		sessionSet[session] = struct{}{}
+	}
+	var sessions []*ptySession
+	for session := range sessionSet {
 		waits = append(waits, session.done)
 		sessions = append(sessions, session)
 	}
@@ -46,6 +53,7 @@ func (m *Manager) CleanupAndWait(ctx context.Context) error {
 		if m.sessions[session.id] == session {
 			delete(m.sessions, session.id)
 		}
+		delete(m.retiredSessions, session)
 	}
 	m.sessMu.Unlock()
 	target := filepath.Dir(m.dir)
