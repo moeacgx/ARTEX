@@ -71,6 +71,7 @@ func (s *Server) orchestrationTools() []actool.CoreTool {
 		s.toolGetTaskGraph(),
 		s.toolListTaskFindings(),
 		s.toolAddHint(),
+		s.toolAddGoal(),
 		s.toolGetWorkerTrace(),
 		s.toolListWorkerTraces(),
 		s.toolSearchWorkerTraces(),
@@ -147,10 +148,17 @@ func wrTool(name, desc string, schema map[string]any, run func(context.Context, 
 // that task's store, strips task_id, and calls the chosen per-task tool — so the
 // cross-task read reuses the exact in-task logic against another task.
 func (s *Server) delegateToTask(ctx context.Context, in json.RawMessage, pick func(*agent.ToolSet) actool.CoreTool) (actool.Result, error) {
+	return s.delegateTaskTool(ctx, in, pick, false)
+}
+
+// 追加写操作登记任务活动，防止删除或出口切换跨越登记、恢复与通知过程。
+func (s *Server) delegateTaskTool(ctx context.Context, in json.RawMessage, pick func(*agent.ToolSet) actool.CoreTool, followup bool) (actool.Result, error) {
 	var head struct {
 		TaskID string `json:"task_id"`
 	}
-	_ = json.Unmarshal(in, &head)
+	if err := json.Unmarshal(in, &head); err != nil {
+		return actool.Errorf("参数无效"), nil
+	}
 	if strings.TrimSpace(head.TaskID) == "" {
 		return actool.Errorf("task_id 为必填"), nil
 	}
@@ -158,16 +166,37 @@ func (s *Server) delegateToTask(ctx context.Context, in json.RawMessage, pick fu
 	if !ok {
 		return actool.Errorf("task 不存在: " + head.TaskID), nil
 	}
+	if followup {
+		var finish func()
+		var admitted bool
+		ctx, finish, admitted = s.engine.beginTaskOperationContext(ctx, t.ID)
+		if !admitted {
+			return actool.Errorf("任务正被删除、切换出口或等待恢复，未登记追加工作"), nil
+		}
+		defer finish()
+	}
 	var m map[string]json.RawMessage
 	_ = json.Unmarshal(in, &m)
 	delete(m, "task_id")
 	inner, _ := json.Marshal(m)
 	tsx := agent.NewToolSet(t.Store, "orchestrator")
+	taskID, _ := strconv.ParseInt(t.ID, 10, 64)
+	tsx.SetTaskID(taskID)
 	if s.m.Assets() != nil {
 		tsx.SetAssetStore(s.m.Assets(), s.m.Assets().Companies())
 	}
 	tsx.SetNotify(t.Notify)         // 通用唤醒（无专用回调的写操作走它；读工具为 no-op）
 	tsx.SetNotifyHint(t.NotifyHint) // add_hint → 记一条「人新增了 N 条战略提示：…」触发并唤醒 planner
+	if followup {
+		tsx.SetResumeTaskChecked(func() error {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			_, err := s.admitTask(t, "resume")
+			return err
+		})
+		tsx.SetNotifyGoal(t.NotifyGoal)
+	}
 	return pick(tsx).Call(ctx, inner, nil)
 }
 
@@ -388,7 +417,7 @@ func (s *Server) toolListTaskFindings() actool.CoreTool {
 }
 
 func (s *Server) toolAddHint() actool.CoreTool {
-	return wrTool("add_task_hint", "给指定任务注入战略提示(该任务的 planner 下轮生成意图时会读到)。\n"+
+	return wrTool("add_task_hint", "给指定任务追加战略方向和独立验收目标；先取消完成状态，恢复运行或排队，再唤醒 Planner 和 Worker，保留旧成果。\n"+
 		"★优先批量：多条提示放进 hints 数组一次提交（返回 ids 数组，与 hints 等长同序，失败项 id=0）；单条则省略 hints 直接给顶层 text。",
 		objSchema(map[string]any{
 			"task_id":      strParam("任务 id"),
@@ -398,7 +427,20 @@ func (s *Server) toolAddHint() actool.CoreTool {
 			"asset_ids":    map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "锚定的资产 id（可选，0/1/多个；该任务内的资产 id）"},
 		}, "task_id"),
 		func(ctx context.Context, in json.RawMessage) (actool.Result, error) {
-			return s.delegateToTask(ctx, in, (*agent.ToolSet).AddHintTool)
+			return s.delegateTaskTool(ctx, in, (*agent.ToolSet).AddHintTool, true)
+		})
+}
+
+func (s *Server) toolAddGoal() actool.CoreTool {
+	return wrTool("add_task_goal", "给指定任务追加可核验目标；先取消完成状态，恢复运行或排队，再由 Planner 规划、Worker 执行并验收。保留原任务及旧成果；准入失败时按返回 ID 核对，不重复登记。",
+		objSchema(map[string]any{
+			"task_id":   strParam("任务 id"),
+			"text":      strParam("[单条] 可核验的追加目标"),
+			"vulnclass": strParam("[单条] 可选漏洞类"),
+			"goals":     map[string]any{"type": "array", "description": "批量目标，返回 ids 同序；失败项为 0", "items": objSchema(map[string]any{"text": strParam("可核验目标"), "vulnclass": strParam("可选漏洞类")}, "text")},
+		}, "task_id"),
+		func(ctx context.Context, in json.RawMessage) (actool.Result, error) {
+			return s.delegateTaskTool(ctx, in, (*agent.ToolSet).SetGoalsTool, true)
 		})
 }
 
@@ -511,6 +553,7 @@ func (s *Server) seedOrchestrationTools() {
 		_ = s.m.PG().SeedTool(t.Name(), t.Description(), schema, autoAgents)
 	}
 	s.refreshBuiltinToolSchemas()
+	s.refreshTaskFollowupTools()
 	s.seedAutoDefaultBindings()
 	s.seedPlannerDefaultBindings()
 	s.seedPlannerListAssetsBinding()
@@ -568,6 +611,22 @@ func (s *Server) refreshBuiltinToolSchemas() {
 	}
 	_ = s.m.pg.SetSetting(flag, "true")
 	log.Printf("[tools] 已刷新 orchestration/platform 工具 schema 到代码默认(一次性)")
+}
+
+// 只刷新追加入口的说明，不重跑全目录迁移或重新绑定用户禁用的工具。
+func (s *Server) refreshTaskFollowupTools() {
+	const flag = "tool_schema_refresh_task_followup_v1"
+	if v, _, _ := s.m.pg.GetSetting(flag); v == "true" {
+		return
+	}
+	for _, tool := range []actool.CoreTool{s.toolAddHint(), s.toolAddGoal(), agent.NewToolSet(nil, "human").AddHintTool()} {
+		schema, _ := json.Marshal(tool.InputSchema())
+		if err := s.m.pg.RefreshToolDefaults(tool.Name(), tool.Description(), schema); err != nil {
+			log.Printf("[tools] 追加入口 %s 更新失败: %v", tool.Name(), err)
+			return
+		}
+	}
+	_ = s.m.pg.SetSetting(flag, "true")
 }
 
 // unbindGoalMetDefault removes goal_met's default "planner" binding ONCE (guarded by

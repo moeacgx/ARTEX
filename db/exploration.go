@@ -195,6 +195,15 @@ func (s *ExplorationStore) Root() (description, goal string, err error) {
 
 // AddNode writes a typed reasoning node with optional anchors to asset ids.
 func (s *ExplorationStore) AddNode(kind string, payload map[string]any, priority int, state, origin string, anchors []int64) (int64, error) {
+	return s.addNode(kind, payload, priority, state, origin, anchors, false)
+}
+
+// AddFollowupHint 将追加方向和独立验收目标原子登记，普通提示不产生执行目标。
+func (s *ExplorationStore) AddFollowupHint(payload map[string]any, anchors []int64) (int64, error) {
+	return s.addNode(KindHint, payload, 0, "active", "human", anchors, true)
+}
+
+func (s *ExplorationStore) addNode(kind string, payload map[string]any, priority int, state, origin string, anchors []int64, followupHint bool) (int64, error) {
 	raw, _ := json.Marshal(payload)
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -218,9 +227,13 @@ VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
 			return 0, err
 		}
 	}
-	if kind == KindIntent && state == "open" && origin == "human" {
+	if followupHint || (kind == KindIntent && state == "open" && origin == "human") {
 		// 人工追加方向有独立验收范围，目标与意图同时提交；不重置历史 met 目标。
-		goalRaw, err := json.Marshal(map[string]any{"text": "完成追加工作：" + fmt.Sprint(payload["summary"]), "intent_id": id})
+		goalPayload := map[string]any{"text": "完成追加工作：" + fmt.Sprint(payload["summary"]), "intent_id": id}
+		if followupHint {
+			goalPayload = map[string]any{"text": "完成追加方向：" + fmt.Sprint(payload["text"]), "hint_id": id}
+		}
+		goalRaw, err := json.Marshal(goalPayload)
 		if err != nil {
 			return 0, err
 		}

@@ -21,7 +21,7 @@ func (p *questionProvider) Stream(context.Context, llm.CompletionRequest) iter.S
 func (p *questionProvider) Complete(_ context.Context, req llm.CompletionRequest) (llm.Message, string, llm.Usage, error) {
 	p.seen = true
 	data, _ := json.Marshal(req.Tools)
-	for _, forbidden := range []string{"Bash", "Write", "Edit", "add_intent", "set_goals", "WebFetch", "WebSearch", "add_proxies", "Skill", "mcp__"} {
+	for _, forbidden := range []string{"Bash", "Write", "Edit", "add_intent", "add_hint", "set_goals", "WebFetch", "WebSearch", "add_proxies", "Skill", "mcp__"} {
 		if strings.Contains(string(data), `"name":"`+forbidden+`"`) || (forbidden == "mcp__" && strings.Contains(string(data), "mcp__")) {
 			p.t.Fatalf("追问开放了执行工具 %s", forbidden)
 		}

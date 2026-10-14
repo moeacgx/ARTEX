@@ -86,8 +86,19 @@ func chatWorkDirSpec(workDir string) string {
 // chatSystem renders the DB-managed prompt body for agentKey. Custom agents have
 // no per-key in-code default, so DefaultAssistantPrompt is the render fallback.
 func chatSystem(agentKey, dataDir, workDir string) string {
-	return renderSystem(agentKey, DefaultAssistantPrompt, chatVars{DataDir: dataDir, Now: nowStr()}) + chatWorkDirSpec(workDir)
+	body := renderSystem(agentKey, DefaultAssistantPrompt, chatVars{DataDir: dataDir, Now: nowStr()}) + chatWorkDirSpec(workDir)
+	if agentKey == "auto" {
+		body += autoTaskFollowupContract
+	}
+	return body
 }
+
+// 固定续做合同兼容已保存的 Auto 自定义提示词，不覆盖其正文或工具授权。
+const autoTaskFollowupContract = `
+【原任务追加执行】
+用户要求指定任务继续做事时，用 add_task_goal 追加可核验目标，或用 add_task_hint 追加战略方向。两者先取消该任务的完成状态并恢复运行或排队，再唤醒 Planner，由 Worker 执行，验收后再次完成。保留原任务 ID、历史目标和成果，不因完成就另建任务。
+纯解释已有结果不追加工作。工具不可用或登记、准入失败时如实说明；已经返回 ID 的工作不能重复登记，也不能把写入成功误报为执行完成。
+`
 
 // chatVars carries the runtime variables a custom agent's prompt may reference.
 // DataDir (server data root) + Now (server wall-clock, refreshed each turn) are the

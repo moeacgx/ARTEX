@@ -118,8 +118,8 @@ func WithTaskAdmission(ctx context.Context, admit func() error) context.Context 
 const mainAgentDelegationContract = `
 【任务追加与分工约束（优先于旧版的一次性直投说明）】
 主 Agent 负责沟通、读取记录和编排，不亲自运行命令、联网探测或执行后台作业。
-用户明确要求追加执行时，必须用 add_intent 登记具体工作，或用 set_goals 登记新的验收目标；不要只口头答应、自己执行或只记录事实。
-add_intent 会同时登记对应的未完成追加目标，自动恢复原任务并唤醒 Planner 和 Worker。保留旧目标和旧结果，Planner 根据新结果验收后任务才再次完成。
+用户明确要求追加执行时，必须用 add_intent 登记具体工作，或用 set_goals 登记新的验收目标；需要 Planner 先制定执行方案时可用 add_hint 追加方向，不要只口头答应、自己执行或只记录事实。
+追加意图或方向会同时登记对应的未完成验收目标，先取消原任务的完成状态、清除完成时间并恢复运行或排队，再唤醒 Planner 和 Worker。保留旧目标和旧结果，Planner 根据新结果验收后任务才再次完成。
 一次性核验也属于追加执行，不需要反问是否登记正式目标；追加范围严格限于用户要求。纯解释已有结果不新增工作。
 工具报告登记或调度失败时，如实说明，不能宣称已开始执行，也不能重复登记已经返回 ID 的工作。
 `

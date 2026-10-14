@@ -17,6 +17,12 @@ import (
 )
 
 func TestTaskFollowupMainPlannerWorkerLifecycle(t *testing.T) {
+	for _, entry := range []string{"main_intent", "main_hint", "main_goal", "auto_hint", "auto_goal"} {
+		t.Run(entry, func(t *testing.T) { testFollowupPlannerWorker(t, entry) })
+	}
+}
+
+func testFollowupPlannerWorker(t *testing.T, entry string) {
 	m, err := NewManager(t.TempDir(), "")
 	if err != nil {
 		t.Fatal(err)
@@ -52,8 +58,14 @@ func TestTaskFollowupMainPlannerWorkerLifecycle(t *testing.T) {
 	var releaseOnce, startOnce sync.Once
 	defer releaseOnce.Do(func() { close(release) })
 	var plannerCalls atomic.Int32
+	var dispatched atomic.Bool
+	var prematureExecution atomic.Bool
 	planner := agent.NewPlanner(retestProvider{complete: func(_ context.Context, req llm.CompletionRequest) (llm.Message, string, llm.Usage, error) {
 		plannerCalls.Add(1)
+		row, readErr := m.pg.GetTask(mustTaskID(t, task.ID))
+		if readErr != nil || row.Status != "running" || row.CompletedAt != nil {
+			prematureExecution.Store(true)
+		}
 		goals, _ := task.Store.ListByKind(db.KindGoal, 100)
 		facts, _ := task.Store.ListByKind(db.KindFact, 100)
 		for _, g := range goals {
@@ -66,6 +78,9 @@ func TestTaskFollowupMainPlannerWorkerLifecycle(t *testing.T) {
 					}
 				}
 			}
+		}
+		if entry != "main_intent" && dispatched.CompareAndSwap(false, true) {
+			return followupTool("add_intent", `{"summary":"核验追加本地结果"}`)
 		}
 		return followupText("等待追加 Worker 的实际结果")
 	}}, "fixture", m.dir, nil, 10000, 3)
@@ -90,13 +105,31 @@ func TestTaskFollowupMainPlannerWorkerLifecycle(t *testing.T) {
 	main := agent.NewMainAgent(retestProvider{complete: func(context.Context, llm.CompletionRequest) (llm.Message, string, llm.Usage, error) {
 		calls++
 		if calls == 1 {
-			return followupTool("add_intent", `{"summary":"核验追加本地结果"}`)
+			name := map[string]string{"main_intent": "add_intent", "main_hint": "add_hint", "main_goal": "set_goals"}[entry]
+			return followupTool(name, `{"summary":"核验追加本地结果","text":"核验追加本地结果"}`)
 		}
 		return followupText("已登记追加工作")
 	}}, "fixture", m.dir, nil, 10000, 3)
 	main.SetNonStreaming(func() bool { return true })
 	tid, _ := strconv.ParseInt(task.ID, 10, 64)
-	_, err = main.Chat(agent.WithTaskAdmission(ctx, func() error { _, err := s.admitTask(task, "resume"); return err }), tid, 0, nil, task.Store, task.Goal, "请继续追加核验", nil, task.Notify, nil, task.NotifyGoal, task.NotifyHint)
+	if entry == "auto_hint" || entry == "auto_goal" {
+		name := map[string]string{"auto_hint": "add_task_hint", "auto_goal": "add_task_goal"}[entry]
+		found := false
+		for _, tool := range s.orchestrationTools() {
+			if tool.Name() == name {
+				found = true
+				res, callErr := tool.Call(ctx, json.RawMessage(fmt.Sprintf(`{"task_id":%q,"text":"核验追加本地结果"}`, task.ID)), nil)
+				if callErr != nil || res.IsError {
+					t.Fatalf("Auto 追加失败: %v %s", callErr, res.Flatten())
+				}
+			}
+		}
+		if !found {
+			t.Fatalf("缺少 Auto 工具 %s", name)
+		}
+	} else {
+		_, err = main.Chat(agent.WithTaskAdmission(ctx, func() error { _, err := s.admitTask(task, "resume"); return err }), tid, 0, nil, task.Store, task.Goal, "请继续追加核验", nil, task.Notify, nil, task.NotifyGoal, task.NotifyHint)
+	}
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -111,6 +144,9 @@ func TestTaskFollowupMainPlannerWorkerLifecycle(t *testing.T) {
 	}
 	if plannerCalls.Load() == 0 {
 		t.Fatal("旧目标已达成后 Planner 未参与追加工作")
+	}
+	if prematureExecution.Load() {
+		t.Fatal("Planner 执行前未取消完成状态或未清除完成时间")
 	}
 	if m.TaskStatus(task.ID) != "running" {
 		t.Fatalf("追加工作期间状态 %s", m.TaskStatus(task.ID))

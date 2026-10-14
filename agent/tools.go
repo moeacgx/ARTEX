@@ -123,6 +123,9 @@ func (t *ToolSet) SetNotifyHint(fn func([]string)) { t.notifyHint = fn }
 // the main-agent chat, so runtime-added goals can pull a finished task back to running.
 func (t *ToolSet) SetResumeTask(fn func()) { t.resumeTask = fn }
 
+// SetResumeTaskChecked 接入正式准入；失败时保留已登记的工作身份并报告未执行。
+func (t *ToolSet) SetResumeTaskChecked(fn func() error) { t.resumeTaskChecked = fn }
+
 func (t *ToolSet) resumeAddedWork() error {
 	if t.resumeTaskChecked != nil {
 		return t.resumeTaskChecked()
@@ -227,6 +230,7 @@ func (t *ToolSet) ListWorkerTracesTool() actool.CoreTool   { return t.listWorker
 func (t *ToolSet) SearchWorkerTracesTool() actool.CoreTool { return t.searchAllWorkerTraces() }
 func (t *ToolSet) NodeDetailTool() actool.CoreTool         { return t.nodeDetail() }
 func (t *ToolSet) AddHintTool() actool.CoreTool            { return t.addHint() }
+func (t *ToolSet) SetGoalsTool() actool.CoreTool           { return t.setGoals() }
 
 // SetEnrich wires the async enrichment engine (DNS/HTTP auto-completion).
 func (t *ToolSet) SetEnrich(e EnrichTrigger) { t.enrich = e }
@@ -1458,6 +1462,9 @@ func (t *ToolSet) addOneHint(it hintItem) (int64, error) {
 	}
 	// 唤醒 planner 不在此处逐条做——由 addHint 在整批写完后统一触发一次（带上提示文本），
 	// 避免一次 add_hint 多条提示逐条刷屏 planner 的触发行。
+	if t.resumeTaskChecked != nil || t.resumeTask != nil {
+		return t.ts.AddFollowupHint(payload, anchors)
+	}
 	return t.ts.AddNode(db.KindHint, payload, 0, "active", "human", anchors)
 }
 
@@ -1532,6 +1539,10 @@ func (t *ToolSet) setGoals() actool.CoreTool {
 				addedTexts = append(addedTexts, strings.TrimSpace(it.Text))
 			}
 			if len(addedTexts) > 0 {
+				// 先取消完成状态并通过正式准入，再唤醒规划；排队时由调度器启动。
+				if err := t.resumeAddedWork(); err != nil {
+					return actool.Errorf(fmt.Sprintf("目标已登记 ids=%v，但任务运行准入失败；尚未开始执行，请核对原 ID，不要重复登记：%v", ids, err)), nil
+				}
 				// 唤醒 planner(整批一次)。优先 notifyGoal:一次 set_goals 记一条「人新增了
 				// N 个目标:…」触发,不逐条刷屏;拆解器/worker 无此回调 → 退回纯 notify(拆解器
 				// round-0 连 notify 也没接,即无操作,因为此时 planner 尚未启动)。
@@ -1540,11 +1551,6 @@ func (t *ToolSet) setGoals() actool.CoreTool {
 					t.notifyGoal(addedTexts)
 				case t.notify != nil:
 					t.notify()
-				}
-				// 主 agent 运行时新增目标 → 把已完成/暂停的任务拉回 running 继续跑(终态门会
-				// 吞掉普通 notify,必须显式复活)。仅 mainagent 接了此回调;拆解器/worker 为 nil。
-				if err := t.resumeAddedWork(); err != nil {
-					return actool.Errorf(fmt.Sprintf("目标已登记 ids=%v，但任务运行准入失败；尚未开始执行，请核对原 ID，不要重复登记：%v", ids, err)), nil
 				}
 			}
 
@@ -1637,7 +1643,7 @@ func (t *ToolSet) setConstraints() actool.CoreTool {
 }
 
 func (t *ToolSet) addHint() actool.CoreTool {
-	return t.writeExpTool("add_hint", "把人类/主 agent 的战略提示挂到探索图，规划者下次生成意图时会读到它。\n"+
+	return t.writeExpTool("add_hint", "把人类/主 Agent 的追加方向挂到探索图。主 Agent 或 Auto 调用时同时新增验收目标，先取消完成状态并恢复运行或排队，再唤醒 Planner 规划和 Worker 执行；保留旧目标与成果。\n"+
 		"★优先批量：多条提示放进 hints 数组一次提交（比逐条调用省往返）。返回 ids 数组，与 hints 等长同序（失败项 id=0，详情见 errors）。单条则省略 hints 直接给顶层 text。",
 		obj(map[string]any{
 			"hints":        map[string]any{"type": "array", "description": "【优先用这个】要新增的提示数组，按顺序处理。每个元素字段同下方顶层字段（text/asset_ids/traffic_refs）。返回 ids 与本数组等长、同序。", "items": obj(map[string]any{"text": str("提示内容"), "asset_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}}, "traffic_refs": HintTrafficSchema()})},
@@ -1670,6 +1676,9 @@ func (t *ToolSet) addHint() actool.CoreTool {
 				addedTexts = append(addedTexts, strings.TrimSpace(it.Text))
 			}
 			if len(addedTexts) > 0 {
+				if err := t.resumeAddedWork(); err != nil {
+					return actool.Errorf(fmt.Sprintf("提示及追加目标已登记 ids=%v，但任务运行准入失败；尚未开始执行，请核对原 ID，不要重复登记：%v", ids, err)), nil
+				}
 				// 唤醒 planner（整批一次）。优先 notifyHint：一次 add_hint 记一条「人新增了
 				// N 条战略提示：…」触发，让 planner 明确"本轮由新增 hint 触发"并看到提示内容；
 				// 未接该回调时退回纯 notify（bare wake，hint 仍折在图里供其自行读取）。
