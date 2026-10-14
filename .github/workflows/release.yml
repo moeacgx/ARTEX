@@ -125,7 +125,7 @@ jobs:
           ref: ${{ inputs.tag || github.ref_name }}
       - name: Resolve package name
         run: |
-          echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
+          echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/artex" >> "$GITHUB_ENV"
           echo "REVISION=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
       - name: Use official browser downloads for older release tags
         run: sed -i 's#https://cdn.npmmirror.com/binaries/playwright##g' Dockerfile
@@ -188,7 +188,7 @@ jobs:
         env:
           RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
         run: |
-          IMAGE="ghcr.io/${GITHUB_REPOSITORY,,}"
+          IMAGE="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/artex"
           cd digests
           docker buildx imagetools create -t "$IMAGE:$RELEASE_TAG" -t "$IMAGE:latest" \
             $(printf "$IMAGE@sha256:%s " *)

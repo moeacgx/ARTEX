@@ -1,17 +1,23 @@
 <div align="center">
 
-# ARTEX
+# ARTEX-P
 
-AI 自主渗透测试系统（Go 后端 + Next.js 前端）
+AI 自主渗透测试系统 · 自用持续维护分支（Go 后端 + Next.js 前端）
 
 
-🌐 **在线 Demo（模拟数据）**： [https://artex-demo.mhtsec.com](https://artex-demo.mhtsec.com)
+🌐 **原项目在线 Demo（模拟数据）**： [https://artex-demo.mhtsec.com](https://artex-demo.mhtsec.com)
 
-📦 **本仓库在上游源码基础上持续维护代理中心、多模型与 WARP 功能。镜像发布到 [GitHub Packages](https://github.com/moeacgx/ARTEX/pkgs/container/artex)，安装包发布到 [Releases](https://github.com/moeacgx/ARTEX/releases)，页面一键更新使用本仓库发布源。**
+📦 **原 ARTEX 项目已停止维护。ARTEX-P 基于原项目最后源码版本，作为我们自用的分支继续维护，按实际使用需求修复问题、完善功能。当前维护包括代理中心、多模型、WARP、任务续做及一键更新。镜像发布到 [GitHub Packages](https://github.com/moeacgx/ARTEX-P/pkgs/container/artex)，安装包发布到 [Releases](https://github.com/moeacgx/ARTEX-P/releases)，页面一键更新使用本仓库发布源。**
 
 </div>
 
 ---
+
+## 项目来源与维护说明
+
+本项目源自 [ARTEX 源码备份](https://github.com/mhtsec/ARTEX)。感谢原作者及贡献者的工作，原有版权与许可证声明继续保留。
+
+ARTEX-P 是独立的自用维护分支，并非原作者的官方续作。后续维护以我们的实际使用需求为主，安装包、容器镜像和一键更新由本仓库发布。下方截图及演示链接来自原项目，仅供参考。
 
 ## 截图预览
 
@@ -71,8 +77,8 @@ AI 自主渗透测试系统（Go 后端 + Next.js 前端）
 ### 方式一：一键安装脚本（推荐）
 
 ```bash
-git clone https://github.com/moeacgx/ARTEX.git
-cd ARTEX
+git clone https://github.com/moeacgx/ARTEX-P.git
+cd ARTEX-P
 ./install.sh
 ```
 
@@ -86,8 +92,8 @@ cd ARTEX
 ### 方式二：Docker Compose（手动）
 
 ```bash
-git clone https://github.com/moeacgx/ARTEX.git
-cd ARTEX
+git clone https://github.com/moeacgx/ARTEX-P.git
+cd ARTEX-P
 cp .env.example .env          # 填 POSTGRES_PASSWORD、可选 ANTHROPIC_API_KEY
 docker compose up -d          # 拉取 ghcr.io/moeacgx/artex 镜像 + postgres
 # → http://localhost:8787
@@ -106,7 +112,7 @@ docker compose up -d          # 拉取 ghcr.io/moeacgx/artex 镜像 + postgres
 
 ### 方式三：下载预编译二进制（Releases）
 
-到本仓库 [Releases](https://github.com/moeacgx/ARTEX/releases) 下载对应平台的 zip，并使用同一 Release 的 `SHA256SUMS` 校验。解压后得到 `artex` + `start.sh`（Windows 为 `start.bat`）+ `skills/` + `config.example.json`：
+到本仓库 [Releases](https://github.com/moeacgx/ARTEX-P/releases) 下载对应平台的 zip，并使用同一 Release 的 `SHA256SUMS` 校验。解压后得到 `artex` + `start.sh`（Windows 为 `start.bat`）+ `skills/` + `config.example.json`：
 
 ```bash
 cp config.example.json config.json   # 填好 database 连接
@@ -163,7 +169,7 @@ git push origin v2.2.1
 
 ### 方式一：页面一键更新（推荐）
 
-更新源固定为 **`moeacgx/ARTEX`**，不会回退到原作者或上游仓库。已有 `dev` 或带提交后缀的构建需先通过镜像或安装包换到正式版本。
+更新源固定为 **`moeacgx/ARTEX-P`**，不会回退到原作者或上游仓库。已有 `dev` 或带提交后缀的构建需先通过镜像或安装包换到正式版本。
 
 在 **系统配置** 页（侧边栏「系统配置」→ `/system/settings`）的**版本与更新**卡片里，可以直接检查并安装新版本，无需登录服务器。
 
@@ -181,7 +187,7 @@ git push origin v2.2.1
 ### 方式二：一键更新脚本
 
 ```bash
-cd ARTEX
+cd ARTEX-P
 ./update.sh
 ```
 
@@ -193,7 +199,7 @@ cd ARTEX
 ### 方式三：Docker Compose（手动）
 
 ```bash
-cd ARTEX
+cd ARTEX-P
 git pull                       # 更新 compose / 脚本（可选）
 # 指定版本：在 .env 设 ARTEX_TAG=v2.2.1；不设则用 latest
 docker compose pull artex
@@ -203,7 +209,7 @@ docker image prune -f          # 清理旧镜像（可选）
 
 ### 方式四：预编译二进制（Releases）
 
-到 [Releases](https://github.com/moeacgx/ARTEX/releases) 下载新版本 zip，停掉旧进程后覆盖 `artex` 与 `skills/`（保留你的 `config.json` 与 `data/`），重启即可：
+到 [Releases](https://github.com/moeacgx/ARTEX-P/releases) 下载新版本 zip，停掉旧进程后覆盖 `artex` 与 `skills/`（保留你的 `config.json` 与 `data/`），重启即可：
 
 ```bash
 cp -r <解压目录>/skills ./ && cp <解压目录>/artex ./

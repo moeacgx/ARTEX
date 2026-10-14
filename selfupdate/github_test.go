@@ -15,11 +15,11 @@ func (f releaseTransport) RoundTrip(r *http.Request) (*http.Response, error) { r
 // 检查真实查询入口与发布包约定，避免 fork 用户再次收到原作者的更新。
 func TestFetchLatestUsesForkRelease(t *testing.T) {
 	client := &http.Client{Transport: releaseTransport(func(r *http.Request) (*http.Response, error) {
-		if r.URL.String() != "https://api.github.com/repos/moeacgx/ARTEX/releases/latest" {
+		if r.URL.String() != "https://api.github.com/repos/moeacgx/ARTEX-P/releases/latest" {
 			t.Fatalf("更新查询指向错误仓库: %s", r.URL)
 		}
 		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{
-			"tag_name":"v2.2.1", "html_url":"https://github.com/moeacgx/ARTEX/releases/tag/v2.2.1",
+			"tag_name":"v2.2.1", "html_url":"https://github.com/moeacgx/ARTEX-P/releases/tag/v2.2.1",
 			"assets":[
 				{"name":"artex-2.2.1-linux-amd64.zip"},
 				{"name":"artex-2.2.1-linux-arm64.zip"},
