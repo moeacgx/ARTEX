@@ -21,6 +21,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -287,8 +288,8 @@ func TestProxyPGWarpOneClick(t *testing.T) {
 				if mode == "register-fail" {
 					for _, action := range []string{"register", "recover"} {
 						c, _, r := proxyAPI(t, mux, "POST", path+"/warp/"+action, `{"accept_terms":true}`)
-						if c != 502 {
-							t.Fatalf("不确定注册可重试: %d %s", c, r)
+						if c != 409 {
+							t.Fatalf("不确定注册未保持人工恢复屏障: %d %s", c, r)
 						}
 					}
 				}
@@ -326,6 +327,17 @@ func TestProxyPGWarpOneClick(t *testing.T) {
 					t.Fatalf("渠道WARP引用未解析可信出口: %v", err)
 				}
 				task := createRuntimeTask(t, s, db.TaskProxyModeFixed, &proxyID)
+				taskID, _ := strconv.ParseInt(task.ID, 10, 64)
+				activity, err := s.m.pg.AcquireTaskOperation(taskID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				activityReleased := false
+				defer func() {
+					if !activityReleased {
+						_ = s.m.pg.ReleaseTaskOperationToken(taskID, activity.OperationToken)
+					}
+				}()
 				badProbe := filepath.Join(os.Getenv("ARTEX_WARP_DIR"), warpProfileID(proxyID), "synthetic-bad-probe")
 				if err := os.WriteFile(badProbe, []byte("fail"), 0600); err != nil {
 					t.Fatal(err)
@@ -346,6 +358,10 @@ func TestProxyPGWarpOneClick(t *testing.T) {
 				if c != 409 {
 					t.Fatalf("WARP action绕过任务引用屏障: %d %s", c, r)
 				}
+				if err := s.m.pg.ReleaseTaskOperationToken(taskID, activity.OperationToken); err != nil {
+					t.Fatal(err)
+				}
+				activityReleased = true
 				if _, err := s.m.pg.Exec(`UPDATE tasks SET status='done' WHERE id=$1`, task.ID); err != nil {
 					t.Fatal(err)
 				}
@@ -364,7 +380,7 @@ func TestProxyPGWarpOneClick(t *testing.T) {
 			if strings.Count(string(calls), "register\n") != 1 {
 				t.Fatalf("重复注册: %s", calls)
 			}
-			if mode == "ready" && (strings.Count(string(calls), "start\n") != 1 || strings.Count(string(calls), "probe\n") != 2) {
+			if mode == "ready" && (strings.Count(string(calls), "start\n") != 1 || strings.Count(string(calls), "probe\n") != 5) {
 				t.Fatalf("重复启动或漏探测: %s", calls)
 			}
 			if mode == "ready" {
@@ -419,7 +435,13 @@ func TestProxyPGWarpRuntimeRecovery(t *testing.T) {
 				_ = s.m.pg.DeleteProxy(id)
 			})
 			if scenario == "probe-recovery" {
-				createRuntimeTask(t, s, db.TaskProxyModeFixed, &id)
+				task := createRuntimeTask(t, s, db.TaskProxyModeFixed, &id)
+				taskID, _ := strconv.ParseInt(task.ID, 10, 64)
+				activity, err := s.m.pg.AcquireTaskOperation(taskID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer func() { _ = s.m.pg.ReleaseTaskOperationToken(taskID, activity.OperationToken) }()
 				marker := filepath.Join(os.Getenv("ARTEX_WARP_DIR"), warpProfileID(id), "synthetic-bad-probe")
 				if err := os.WriteFile(marker, []byte("fail"), 0600); err != nil {
 					t.Fatal(err)

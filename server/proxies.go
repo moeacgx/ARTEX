@@ -269,7 +269,7 @@ func (s *Server) updateProxy(w http.ResponseWriter, r *http.Request) {
 	p.ID = id
 	updated, err := s.m.pg.UpdateProxyWithOptions(p, db.ProxyUpdateOptions{URL: req.URL, Password: req.Password, AdminToken: req.ResinAdminToken, ClearPassword: req.ClearPassword, ClearAdminToken: req.ClearAdminToken, Enabled: req.Enabled})
 	if err != nil {
-		if errors.Is(err, db.ErrProxyInUse) {
+		if errors.Is(err, db.ErrProxyInUse) || errors.Is(err, db.ErrWarpHealthBlocked) {
 			writeErr(w, 409, "代理正在创建或被引用")
 		} else {
 			writeErr(w, 400, err.Error())
@@ -381,7 +381,9 @@ func (s *Server) testProxy(w http.ResponseWriter, r *http.Request) {
 		rt, runtimeErr := s.m.proxyRuntime()
 		probeErr = runtimeErr
 		if runtimeErr == nil && rt.health != nil {
-			probeErr = rt.health.RunOnce(r.Context(), id)
+			if probeErr = s.m.pg.PrepareWarpHealthManualProbe(r.Context(), id); probeErr == nil {
+				probeErr = rt.health.RunOnce(r.Context(), id)
+			}
 		} else if runtimeErr == nil {
 			probeErr = errors.New("WARP 健康控制器不可用")
 		}

@@ -23,7 +23,7 @@ func (m *Manager) TaskMCPConfig(ctx context.Context, original *db.MCPServer) (*d
 	}
 	id := agent.RunInfoFrom(ctx).TaskID
 	formal, hasFormal := ctx.Value(proxySubjectContextKey{}).(admittedProxySubject)
-	if id <= 0 && (!hasFormal || formal.Subject.Kind != "conversation") {
+	if id <= 0 && !hasFormal {
 		return original, nil
 	}
 	if original.Transport != "stdio" {

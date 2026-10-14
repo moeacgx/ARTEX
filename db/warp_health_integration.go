@@ -128,6 +128,33 @@ func (d *DB) SetWarpAutoRecovery(ctx context.Context, id, expectedRevision int64
 	})
 }
 
+// PrepareWarpHealthManualProbe 只为明确的管理端“立即检测”清除周期门槛。
+// 不抢占 pending、repair、unknown 或正在执行的 probe，也不改变 Desired/策略。
+func (d *DB) PrepareWarpHealthManualProbe(ctx context.Context, id int64) error {
+	return d.WithWarpHealthLifecycle(ctx, func(tx *sql.Tx) error {
+		proxy, err := getProxyTx(tx, id)
+		if err != nil || proxy.Kind != ProxyKindWarp {
+			return ErrProxyInvalidKind
+		}
+		pending, err := warpCreatePendingTx(tx, id)
+		if err != nil {
+			return err
+		}
+		if pending {
+			return ErrWarpHealthBlocked
+		}
+		state, err := healthTx(ctx, tx, id)
+		if err != nil {
+			return err
+		}
+		if state.Claim.Token != "" || state.ClaimState == "unknown" {
+			return ErrWarpHealthBlocked
+		}
+		_, err = tx.ExecContext(ctx, `UPDATE warp_proxy_health SET next_probe_at=NULL WHERE proxy_id=$1`, id)
+		return err
+	})
+}
+
 // BeginWarpHealthCreate 持有新档案首次注册的独立执行锁；pending 创建意图是唯一允许的前置状态。
 func (d *DB) BeginWarpHealthCreate(ctx context.Context, execution *WarpHealthExecution, id int64, guard WarpHealthRepairGuard) (WarpHealthClaim, error) {
 	if execution == nil || execution.key != warpExecutionKey(id) {

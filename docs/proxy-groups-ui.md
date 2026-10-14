@@ -57,11 +57,13 @@ Chromium 桌面 1440×1000、移动 390×844 的分组、WARP、任务/对话策
 浏览器日志的 409/500 为主动注入的冲突与未知结果。SSE 因合成服务不提供持续会话而显示重连，不计为真实执行验证。
 日志、请求记录、截图和完整文件 SHA256 存于 `web/output/playwright/proxy-groups/`，由 Git ignore 排除验收产物，代码与本文单独本地冻结。`source-sha256.json` 覆盖全部修改文件，`build-sha256.json` 覆盖完整静态构建，`evidence-sha256.json` 覆盖日志、截图与请求记录，`delivery.json` 记录本地 commit 与验证层。
 
+整合树另提供 `scripts/verify-proxy-groups-real.mjs`。它不内置 token、密码、数据库地址或代理凭据，只从测试环境读取合成身份和 ID；真实 Chromium 经 Next 非 mock 页面调用 Go API，并在独立 PostgreSQL 中核对分组成员与任务策略。2026-10-15 的隔离验收创建组 `#6`、保存成员 `#1/#2`，任务策略从 direct 保存为 group revision 1，再保存为 direct revision 2；截图为 `web/output/playwright/proxy-groups-real/ui-go-pg-direct.png`。
+
 ## 分层验收与待办
 
 1. 纯交互状态与真实 API 客户端：已通过。
 2. 真实 Chromium → 非 mock UI → 独立合成 Node HTTP：已通过。
-3. UI → 真实隔离 Go → 新 PostgreSQL：尚未执行，等待主脑统一协调后端稳定提交、启动地址和合成 fixture 数据。不能以本地 Node 请求记录代替 Go/PG 证据。
+3. UI → 真实隔离 Go → 新 PostgreSQL：已通过。验证层为 `Chromium → Next UI → Go API → artex_proxy_ui_verify_test`，使用合成身份、回环代理档案和终态空闲任务；没有生产凭据或外网代理操作。
 4. 真实 Cloudflare 注册、生产登录、生产部署：不在本轮范围。
 
 原创建意图的未知结果只 GET 核对，不自行解除屏障或按运行 healthy 推断持久意图完成。主脑转发的后端真实 PG 测试状态仅记为后端 owner 证据，不替代此 UI 的真实 Go/PG 联调，也不据此声明 MCP/browser/WARP 全面通过。

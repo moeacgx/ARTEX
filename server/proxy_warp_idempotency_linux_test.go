@@ -197,7 +197,7 @@ func TestProxyPGWarpCreateConcurrentManagers(t *testing.T) {
 	if err := otherDB.SetProxyStatus(id, db.ProxyStatusHealthy, "", time.Now()); !errors.Is(err, db.ErrProxyInUse) {
 		t.Errorf("pending允许跨Manager状态写入: %v", err)
 	}
-	if _, err := s.performWarpAction(t.Context(), id, "stop", false); !errors.Is(err, db.ErrProxyInUse) {
+	if _, err := s.performWarpAction(t.Context(), id, "stop", false); !errors.Is(err, db.ErrProxyInUse) && !errors.Is(err, db.ErrWarpHealthBlocked) {
 		t.Errorf("pending允许直接WARP action: %v", err)
 	}
 	if actionCode, _, actionRaw := proxyAPI(t, mux, "POST", fmt.Sprintf("/api/proxies/%d/warp/stop", id), ""); actionCode != 409 {
