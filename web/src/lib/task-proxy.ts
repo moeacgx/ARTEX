@@ -17,7 +17,7 @@ export function taskProxyDraft(task: Task): TaskProxyDraft {
   const mode = task.proxy_mode;
   const id = task.proxy_id ?? task.proxy?.id;
   return {
-    mode: mode && ["inherit", "direct", "fixed"].includes(mode) ? mode : "",
+    mode: mode === "inherit" || mode === "direct" || mode === "fixed" ? mode : "",
     id: typeof id === "number" && id > 0 ? String(id) : "",
   };
 }

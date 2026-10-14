@@ -110,6 +110,7 @@ export function buildProxyPayload(form: ProxyForm, editing: boolean): ProxyWrite
 
 export function taskProxyLabel(task: Pick<Task, "proxy_mode" | "proxy_id" | "proxy">): string {
   if (task.proxy) return `代理 #${task.proxy.id}`;
+  if (task.proxy_mode === "group") return "分组出口待核对";
   if (task.proxy_mode === "direct") return "直连";
   if (task.proxy_mode === "inherit" && !task.proxy_id) return "默认直连";
   return "代理快照缺失";
@@ -131,12 +132,26 @@ export function warpActionNeedsTerms(action: WarpActionKind): boolean {
 export const WARP_TERMS_URL = "https://www.cloudflare.com/application/terms/";
 
 export function warpReady(item: ProxyRecord): boolean {
+  if (item.warp_health) {
+    const health = item.warp_health;
+    return (
+      item.kind === "warp" &&
+      item.enabled &&
+      item.status === "healthy" &&
+      health.proxy_id === Number(item.id) &&
+      health.desired_running &&
+      health.state === "ready" &&
+      !!health.egress_ip?.trim() &&
+      !!health.last_checked_at
+    );
+  }
   return (
     item.kind === "warp" && item.enabled && item.warp_phase === "ready" && item.status === "healthy" && !!item.egress_ip
   );
 }
 
 export function warpAllowedActions(item: ProxyRecord): WarpActionKind[] {
+  if (item.warp_health && ["unknown", "pending", "repairing"].includes(item.warp_health.state)) return [];
   switch (item.warp_phase) {
     case "unregistered":
       return ["register"];

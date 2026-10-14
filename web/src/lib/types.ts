@@ -6,6 +6,19 @@ export type EngineMode = "exploring" | "paused" | "stalled" | "idle";
 export type ProxyKind = "http" | "https" | "socks5" | "warp" | "resin";
 export type TaskProxyMode = "inherit" | "direct" | "fixed";
 
+export interface WarpHealth {
+  proxy_id: number;
+  desired_running: boolean;
+  state: "unknown" | "stopped" | "disabled" | "pending" | "checking" | "ready" | "failed" | "deferred" | "repairing";
+  consecutive_failures: number;
+  recovery_attempts: number;
+  last_checked_at?: string;
+  next_probe_at?: string;
+  next_recovery_at?: string;
+  egress_ip: string;
+  last_error: string;
+}
+
 export interface ProxyRecord {
   id: number;
   name: string;
@@ -25,6 +38,7 @@ export interface ProxyRecord {
   last_checked_at?: string;
   warp_phase?: string;
   egress_ip?: string;
+  warp_health?: WarpHealth;
 }
 
 export type ProxyWriteInput = {
@@ -91,11 +105,21 @@ export interface Task {
   archive_blocked_by_task_id?: string; // live direct dependent that must be archived first
   company_ids?: number[]; // associated company scopes; current company assets join the task at creation
   coverage_enabled?: boolean; // 资产覆盖度功能开关(创建时定,默认开)；false=不计算/不展示覆盖度
-  proxy_mode?: TaskProxyMode;
+  proxy_mode?: TaskProxyMode | "group";
   // 服务端保证返回；前端仍须防御旧响应缺字段，绝不能按 0 提交。
   proxy_revision?: number;
+  recovery_required?: boolean;
   proxy_id?: number;
   proxy?: TaskProxySnapshot;
+  allowed_group_ids?: string[];
+  agent_failover_enabled?: boolean;
+  failover_cooldown_seconds?: number;
+  failover_max_switches?: number;
+  authorization_revision?: number;
+  exit_verified_at?: string | null;
+  latest_switch?: import("./proxy-policy").ProxySwitch | null;
+  cooldown_until?: string | null;
+  remaining_switches?: number;
 }
 
 export interface TaskCategory {

@@ -25,6 +25,7 @@ import { toast } from "sonner";
 import { ApprovalExecutionFocus, useApprovalFocus, useApprovalHistory } from "@/components/approval-execution-focus";
 import { ModelSelect } from "@/components/llm-selection";
 import { MentionTextarea } from "@/components/mention-textarea";
+import { ProxyPolicyControl } from "@/components/proxy-policy-control";
 import { SideQuestionButton, SideQuestionWorkspace } from "@/components/side-question-workspace";
 import { TodoPopover } from "@/components/todo-popover";
 import { Transcript } from "@/components/transcript";
@@ -851,6 +852,11 @@ function ChatView({
         )}
         {running && <LiveBadge />}
         <SideQuestionButton side={side} />
+        <ProxyPolicyControl
+          key={conv.id}
+          subject={{ kind: "conversation", id: String(conv.id) }}
+          onUpdated={onConvUpdated}
+        />
         <div className="text-muted-foreground ml-auto flex min-w-0 max-w-full items-center justify-end gap-x-3 gap-y-1 text-xs max-sm:w-full max-sm:flex-wrap">
           {tokenTotal.turns > 0 && (
             <span title="agent 循环轮次（模型调用次数）" className="tabular-nums">
