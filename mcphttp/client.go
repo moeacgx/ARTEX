@@ -105,6 +105,7 @@ func New(ctx context.Context, server, url string, headers map[string]string, ins
 	if insecure {
 		hc.Transport = &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}
 	}
+	hc = contextHTTPClient(ctx, hc)
 	c := &Client{
 		server:   server,
 		url:      url,
@@ -130,7 +131,12 @@ func NewSSE(ctx context.Context, server, sseURL string, headers map[string]strin
 	if insecure {
 		hc.Transport = &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}
 	}
-	streamCtx, cancel := context.WithCancel(context.Background())
+	// 复用主体出口，但流的生命周期由 Close 控制，不套普通请求总超时。
+	selected := contextHTTPClient(ctx, hc)
+	copyClient := *selected
+	copyClient.Timeout = 0
+	hc = &copyClient
+	streamCtx, cancel := context.WithCancel(ctx)
 	req, err := http.NewRequestWithContext(streamCtx, http.MethodGet, sseURL, nil)
 	if err != nil {
 		cancel()
@@ -355,6 +361,7 @@ func (c *Client) Call(ctx context.Context, tool string, args any) (string, error
 // Close terminates the MCP session best-effort (DELETE with the session id, per the
 // Streamable HTTP spec). Servers that don't track sessions simply ignore it.
 func (c *Client) Close() error {
+	defer c.http.CloseIdleConnections()
 	if c.legacySSE {
 		if c.streamCancel != nil {
 			c.streamCancel()
@@ -365,6 +372,7 @@ func (c *Client) Close() error {
 		select {
 		case <-c.streamDone:
 		case <-time.After(time.Second):
+			return errors.New("MCP 流清理尚未退出")
 		}
 		return nil
 	}
@@ -374,16 +382,23 @@ func (c *Client) Close() error {
 	if sid == "" {
 		return nil
 	}
-	req, err := http.NewRequest(http.MethodDelete, c.url, nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, c.url, nil)
 	if err != nil {
-		return nil
+		return err
 	}
 	req.Header.Set("Mcp-Session-Id", sid)
 	for k, v := range c.headers {
 		req.Header.Set(k, v)
 	}
-	if resp, err := c.http.Do(req); err == nil {
-		resp.Body.Close()
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if (resp.StatusCode < 200 || resp.StatusCode >= 300) && resp.StatusCode != http.StatusNotFound {
+		return fmt.Errorf("MCP 会话清理失败: HTTP %d", resp.StatusCode)
 	}
 	return nil
 }

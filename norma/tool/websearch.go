@@ -94,7 +94,10 @@ func NewWebSearch(cfg WebSearchConfig) (CoreTool, error) {
 			_ = json.Unmarshal(input, &in)
 			return permission.AskUser("web search: " + in.Query)
 		},
-		Run: webSearchRunner(prov),
+		Run: func(ctx context.Context, raw json.RawMessage, tc *ToolContext) (Result, error) {
+			ctx = WithOperationNetworkProxy(ctx, cfg.Proxy)
+			return webSearchRunner(prov)(ctx, raw, tc)
+		},
 	}), nil
 }
 
@@ -225,6 +228,7 @@ func (p *ddgsProvider) Search(ctx context.Context, query string, limit int) ([]S
 	req.Header.Set("Referer", "https://html.duckduckgo.com/")
 	resp, err := p.client.Do(req)
 	if err != nil {
+		reportOperationHTTPFailure(ctx, err)
 		return nil, err
 	}
 	defer resp.Body.Close()
@@ -335,6 +339,7 @@ func (p *braveProvider) Search(ctx context.Context, query string, limit int) ([]
 	req.Header.Set("X-Subscription-Token", p.apiKey)
 	resp, err := p.client.Do(req)
 	if err != nil {
+		reportOperationHTTPFailure(ctx, err)
 		return nil, err
 	}
 	defer resp.Body.Close()
@@ -401,6 +406,7 @@ func (p *tavilyProvider) Search(ctx context.Context, query string, limit int) ([
 	req.Header.Set("Accept", "application/json")
 	resp, err := p.client.Do(req)
 	if err != nil {
+		reportOperationHTTPFailure(ctx, err)
 		return nil, err
 	}
 	defer resp.Body.Close()
@@ -512,6 +518,7 @@ func (p *deepseekProvider) Search(ctx context.Context, query string, limit int) 
 
 	resp, err := p.client.Do(req)
 	if err != nil {
+		reportOperationHTTPFailure(ctx, err)
 		return nil, err
 	}
 	defer resp.Body.Close()

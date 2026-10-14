@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"sync"
+	"time"
 
 	"github.com/Autumn-27/artex/db"
 	"github.com/Autumn-27/artex/egress"
@@ -18,15 +20,6 @@ func (s *Server) warpAction(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil || id <= 0 {
 		writeErr(w, 400, "invalid proxy id")
-		return
-	}
-	pending, err := s.m.pg.WarpCreatePending(id)
-	if err != nil {
-		writeErr(w, 500, "无法读取 WARP 创建状态")
-		return
-	}
-	if pending {
-		writeErr(w, 409, "WARP 创建尚未完成，请使用原 Idempotency-Key 查询结果")
 		return
 	}
 	var req struct {
@@ -46,67 +39,116 @@ func (s *Server) warpAction(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, s.runtimeProxyDTO(p))
 }
 
-// 建档和旧 action 共用同一引用屏障；Create 已包含启动及出口探测，不再二次 Start。
+// 手动 action 持有档案执行锁，网络和进程等待均在短事务外。
 func (s *Server) performWarpAction(ctx context.Context, id int64, action string, acceptTerms bool) (*db.Proxy, error) {
 	runtime, err := s.m.proxyRuntime()
 	if err != nil {
 		return nil, err
 	}
-	var operationErr error
-	p, err := s.m.pg.WithIdleProxy(id, func(p *db.Proxy) error {
-		if p.Kind != db.ProxyKindWarp {
-			return errors.New("不是 WARP 代理")
-		}
-		var profile egress.WarpProfile
-		var err error
-		switch action {
-		case "register":
-			profile, err = runtime.warp.Create(ctx, warpProfileID(id), p.Name, acceptTerms)
-		case "start":
-			profile, err = runtime.warp.Start(ctx, warpProfileID(id))
-		case "stop":
-			profile, err = runtime.warp.Stop(ctx, warpProfileID(id))
-		case "recover":
-			profile, err = runtime.warp.Resume(ctx, warpProfileID(id))
-		default:
-			return errors.New("未知 WARP 操作")
-		}
-		operationErr = err
-		// 操作被拒绝不等于运行器故障；从实际档案刷新，避免毒化仍健康的出口。
-		if current, readErr := runtime.warp.Get(warpProfileID(id)); readErr == nil {
-			profile = current
-		}
-		p.Status = db.ProxyStatusStopped
-		p.LastError = ""
-		if profile.Phase == "ready" {
-			connection, err := runtime.warp.Connection(warpProfileID(id))
-			if err != nil {
-				operationErr = err
-			} else {
-				p.Host, p.Port, p.Username, p.Password, p.Protocol = connection.Host, connection.Port, connection.Username, connection.Password, "socks5"
-				p.URL = (&url.URL{Scheme: "socks5", Host: net.JoinHostPort(p.Host, strconv.Itoa(p.Port)), User: url.UserPassword(p.Username, p.Password)}).String()
-				p.Status = db.ProxyStatusHealthy
-			}
-		}
-		if operationErr == nil && action != "stop" && p.Status != db.ProxyStatusHealthy {
-			operationErr = errors.New("WARP 尚未就绪")
-		}
-		if operationErr != nil && p.Status != db.ProxyStatusHealthy {
-			p.Status = db.ProxyStatusFailed
-			p.LastError = safeProxyRuntimeError(operationErr)
-		}
-		// 运行失败也持久化失败状态，不能回滚为旧 healthy。
-		return nil
-	})
+	if action != "register" && action != "start" && action != "stop" && action != "recover" {
+		return nil, errors.New("未知 WARP 操作")
+	}
+	if action == "register" && !acceptTerms {
+		return nil, errors.New("请先阅读并接受 Cloudflare WARP 条款")
+	}
+	execution, err := s.m.pg.TryWarpHealthExecution(ctx, id)
 	if err != nil {
-		return p, err
+		return nil, err
+	}
+	defer execution.Close()
+	claim, err := execution.BeginWarpHealthManual(ctx, id, s.m.warpHealthRepairGuard)
+	if err != nil {
+		return nil, err
+	}
+	p, err := s.m.pg.GetProxyContext(ctx, id)
+	if err != nil || p == nil || p.Kind != db.ProxyKindWarp {
+		markWarpActionUnknown(execution, claim)
+		return nil, db.ErrProxyUnavailable
+	}
+	// 取消先持久标 unknown；仍同步等待原动作真实退出才释放执行 session。
+	marked := make(chan struct{})
+	var once sync.Once
+	stopMark := context.AfterFunc(ctx, func() {
+		markWarpActionUnknown(execution, claim)
+		once.Do(func() { close(marked) })
+	})
+	var profile egress.WarpProfile
+	var operationErr error
+	switch action {
+	case "register":
+		profile, operationErr = runtime.warp.Create(ctx, warpProfileID(id), p.Name, acceptTerms)
+	case "start":
+		profile, operationErr = runtime.warp.Start(ctx, warpProfileID(id))
+	case "stop":
+		profile, operationErr = runtime.warp.Stop(ctx, warpProfileID(id))
+	case "recover":
+		profile, operationErr = runtime.warp.Resume(ctx, warpProfileID(id))
+	}
+	stopped := stopMark()
+	if !stopped {
+		<-marked
+	}
+	if ctx.Err() != nil || !stopped || errors.Is(operationErr, egress.ErrWarpExitUnknown) {
+		if stopped {
+			markWarpActionUnknown(execution, claim)
+		}
+		return nil, errors.Join(db.ErrWarpHealthBlocked, operationErr)
+	}
+	if current, readErr := runtime.warp.Get(warpProfileID(id)); readErr == nil {
+		profile = current
+	} else if operationErr == nil {
+		operationErr = readErr
+	}
+	p.Status, p.LastError = db.ProxyStatusStopped, ""
+	if profile.Phase == "ready" && profile.Desired {
+		connection, connectionErr := runtime.warp.Connection(warpProfileID(id))
+		if connectionErr != nil {
+			operationErr = errors.Join(operationErr, connectionErr)
+		} else {
+			p.Host, p.Port, p.Username, p.Password, p.Protocol = connection.Host, connection.Port, connection.Username, connection.Password, "socks5"
+			p.URL = (&url.URL{Scheme: "socks5", Host: net.JoinHostPort(p.Host, strconv.Itoa(p.Port)), User: url.UserPassword(p.Username, p.Password)}).String()
+			p.Status = db.ProxyStatusHealthy
+		}
+	}
+	if operationErr == nil && action != "stop" && p.Status != db.ProxyStatusHealthy {
+		operationErr = errors.New("WARP 尚未就绪")
+	}
+	if operationErr != nil && p.Status != db.ProxyStatusHealthy {
+		p.Status, p.LastError = db.ProxyStatusFailed, safeProxyRuntimeError(operationErr)
+	}
+	profile, material, materialErr := runtime.warp.HealthMaterial(warpProfileID(id))
+	if materialErr != nil {
+		if action != "stop" || profile.Desired {
+			markWarpActionUnknown(execution, claim)
+			return nil, errors.Join(db.ErrWarpHealthBlocked, materialErr)
+		}
+		material, profile.Desired = "", false
+	}
+	if err = s.m.pg.CompleteWarpHealthProxyAction(ctx, execution, claim, db.WarpHealthIntent{Desired: profile.Desired, Material: material, ProfileRevision: profile.Revision}, p); err != nil {
+		markWarpActionUnknown(execution, claim)
+		return nil, db.ErrWarpHealthBlocked
+	}
+	if err = execution.Close(); err != nil {
+		return nil, db.ErrWarpHealthBlocked
+	}
+	if profile.Desired && runtime.health != nil {
+		_ = runtime.health.RunOnce(ctx, id)
+		if fresh, readErr := s.m.pg.GetProxyContext(ctx, id); readErr == nil {
+			p = fresh
+		}
 	}
 	return p, operationErr
 }
 
+func markWarpActionUnknown(execution *db.WarpHealthExecution, claim db.WarpHealthClaim) {
+	cleanup, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_ = execution.MarkWarpHealthUnknown(cleanup, claim)
+}
+
 func (s *Server) writeWarpFailure(w http.ResponseWriter, id int64, err error) {
 	code := http.StatusBadGateway
-	if errors.Is(err, db.ErrProxyInUse) {
+	if errors.Is(err, db.ErrProxyInUse) || errors.Is(err, db.ErrWarpHealthBlocked) {
 		code = http.StatusConflict
 	}
 	p, _ := s.m.pg.GetProxy(id)

@@ -193,6 +193,9 @@ func webFetchRunner(cfg WebFetchConfig) func(context.Context, json.RawMessage, *
 		}
 		req.Header.Set("user-agent", "norma/0.4")
 		resp, err := client.Do(req)
+		if cfg.StrictProxy && err != nil {
+			ReportOperationNetworkFailure(ctx, cfg.Proxy, err)
+		}
 		// One direct retry when the proxied attempt failed for a proxy-caused reason.
 		// A non-proxy error (bad host, caller timeout/cancel) is returned as-is — a
 		// direct retry wouldn't fix it. The direct response is NOT captured by the proxy.
@@ -219,6 +222,9 @@ func webFetchRunner(cfg WebFetchConfig) func(context.Context, json.RawMessage, *
 		}
 		if xp := resp.Header.Get("X-Powered-By"); xp != "" {
 			header += "X-Powered-By: " + xp + "\n"
+		}
+		if retry := resp.Header.Get("Retry-After"); retry != "" {
+			header += "Retry-After: " + retry + "\n"
 		}
 
 		var out string

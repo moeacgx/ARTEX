@@ -41,7 +41,7 @@ func TestProxyPGWarpStaleReadyDoesNotExposeIP(t *testing.T) {
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		t.Fatal(err)
 	}
-	meta := fmt.Sprintf(`{"id":%q,"phase":"ready","desired":true,"port":1080,"egress_ip":"198.51.100.42","registered":true,"generated":true}`, warpProfileID(p.ID))
+	meta := fmt.Sprintf(`{"id":%q,"phase":"ready","desired":true,"port":1080,"egress_ip":"8.8.8.8","registered":true,"generated":true}`, warpProfileID(p.ID))
 	if err := os.WriteFile(filepath.Join(dir, "meta.json"), []byte(meta), 0600); err != nil {
 		t.Fatal(err)
 	}

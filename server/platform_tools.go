@@ -24,7 +24,7 @@ func (s *Server) platformTools() []actool.CoreTool {
 		s.toolCreateMCP(),
 		s.toolUpdateMCP(),
 		s.toolDeleteAssetsByHost(),
-	}, s.proxyCenterTools()...)
+	}, append(s.proxyCenterTools(), s.proxyFailoverTools()...)...)
 }
 
 // 旧工具补绑迁移列表。代理工具仅由 SeedTool 首次绑定，不能加入旧补绑迁移。

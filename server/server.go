@@ -615,6 +615,9 @@ func (s *Server) providerForTaskSelection(selection db.LLMModelSelection, t *Tas
 	}
 	cfg.Proxy = proxy
 	id, key := selection.ProfileID, fmt.Sprintf("%s:%x", model.MemberKey(), sha256.Sum256([]byte(proxy)))
+	if t != nil {
+		key += fmt.Sprintf(":%s:%d", t.ID, t.proxyState().Revision)
+	}
 	s.provCacheMu.Lock()
 	if s.provByModel == nil {
 		s.provByModel = map[string]*provEntry{}
@@ -630,10 +633,17 @@ func (s *Server) providerForTaskSelection(selection db.LLMModelSelection, t *Tas
 		log.Printf("[engine] build provider for LLM profile %d failed: %v", id, err)
 		return nil, agent.Config{}, false
 	}
+	closeIdle := agent.ProviderCloseIdle(prov)
 	// Wrap with recorder, tagged with this profile's name.
 	if p, _ := s.m.pg.ProfileByID(id); p != nil {
 		prov = llmrec.Wrap(prov, s.m.PG(), cfg.Model, p.Name, cfg.ThinkingType, cfg.ReasoningEffort, s.m.LLMRecordEnabled, *model)
 		prov = bindSideProvider(prov, cfg, id, p.Name)
+	}
+	if t != nil {
+		if subject, err := runtimeTaskSubject(t); err == nil {
+			proxyID := finalLLMProxyID(t, p.Proxy, p.ProxyMode, p.ProxyID, proxy)
+			prov = proxyPolicyProvider{inner: prov, server: s, subject: subject, revision: t.proxyState().Revision, proxyID: proxyID, proxyURL: proxy, closeIdle: closeIdle}
+		}
 	}
 	s.provCacheMu.Lock()
 	if generation != s.provCacheGen {
@@ -778,6 +788,7 @@ func (s *Server) Handler() http.Handler {
 
 	mux.HandleFunc("GET /api/tasks", s.listTasks)
 	s.registerTaskProxyRoutes(mux)
+	s.registerProxyGroupRoutes(mux)
 	mux.HandleFunc("POST /api/tasks", s.createTask)
 	mux.HandleFunc("GET /api/task-categories", s.pgListTaskCategories)
 	mux.HandleFunc("POST /api/task-categories", s.pgCreateTaskCategory)

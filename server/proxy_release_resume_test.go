@@ -22,10 +22,7 @@ func releaseResumeFixture(t *testing.T) (*Server, *Task) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _, _ = s.m.pg.Exec(`DELETE FROM outbound_proxies WHERE id=$1`, p.ID) })
-	// 仅模拟已注册的 WARP 数据库档案，回收任务路由不启动或注册 WARP。
-	if _, err := s.m.pg.Exec(`UPDATE outbound_proxies SET kind=$2,status='healthy' WHERE id=$1`, p.ID, db.ProxyKindWarp); err != nil {
-		t.Fatal(err)
-	}
+	// 普通 SOCKS5 出口没有外部租约；本组断言只验证回收占用与跨 Manager 准入。
 	if err := s.m.pg.SetGlobalProxyID(&p.ID); err != nil {
 		t.Fatal(err)
 	}

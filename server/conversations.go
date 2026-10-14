@@ -232,7 +232,7 @@ func (s *Server) pgDeleteConversation(w http.ResponseWriter, r *http.Request) {
 	s.cancelConversation(c.ID)
 	s.cancelSideWhere(func(p sidequestion.Parent) bool { return p.ConversationID == c.ID })
 	if err := pg.DeleteConversation(c.ID); err != nil {
-		writeErr(w, 500, err.Error())
+		s.writeProxyPolicyError(w, err)
 		return
 	}
 	writeJSON(w, 200, map[string]any{"deleted": c.ID})
@@ -293,7 +293,7 @@ func (s *Server) pgDeleteConversationsBatch(w http.ResponseWriter, r *http.Reque
 	}
 	deleted, err := pg.DeleteConversations(ids)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error())
+		s.writeProxyPolicyError(w, err)
 		return
 	}
 	deletedSet := make(map[int64]struct{}, len(deleted))
@@ -554,9 +554,15 @@ func (s *Server) runConversationTurn(ctx context.Context, cancel context.CancelC
 		return
 	}
 	// precedence: the conversation agent's own binding → this conversation's pin → global.
-	ca := s.resolveChatAgent(c)
-	if ca == nil {
-		finishReason = s.chatUnavailableReason()
+	ctx, policy, finishProxy, err := s.beginConversationProxy(ctx, c.ID)
+	if err != nil {
+		finishReason = "对话出口准入失败"
+		return
+	}
+	defer finishProxy()
+	ca, err := s.conversationChatAgent(ctx, c, policy)
+	if err != nil {
+		finishReason = "对话模型或代理不可用"
 		return
 	}
 	pg := s.m.pg

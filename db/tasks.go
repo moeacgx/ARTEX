@@ -1,6 +1,7 @@
 package db
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -251,6 +252,9 @@ VALUES ($1, 'fact', $2, 0, 'origin', 'system')`, expID, string(originPayload)); 
 	if err != nil {
 		return nil, err
 	}
+	if proxyMode == TaskProxyModeGroup {
+		return nil, ErrProxyAuthorization
+	}
 	var selected *Proxy
 	if inheritSnapshot && proxyMode != TaskProxyModeDirect {
 		id := opts.ProxySnapshot.ID
@@ -290,6 +294,9 @@ VALUES ($1, 'fact', $2, 0, 'origin', 'system')`, expID, string(originPayload)); 
 	}
 	if selected != nil {
 		if err := usableProxy(selected); err != nil {
+			return nil, err
+		}
+		if err := CheckWarpHealthAdmissionTx(context.Background(), tx, selected.ID); err != nil {
 			return nil, err
 		}
 		if !inheritSnapshot {

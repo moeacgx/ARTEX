@@ -95,6 +95,9 @@ func (l *loop) execOne(use llm.ContentBlock, emitProgress func(tool.ProgressInfo
 	// toolCtx carries the run's MaxDuration deadline, so a tool that overruns the
 	// wall-clock budget is interrupted here (the turn loop then enters wrap-up). During
 	// the wrap-up phase toolCtx is the live parent ctx, so settlement tools run freely.
+	if err := tool.CheckOperationAdmission(l.toolCtx, use.Name); err != nil {
+		return llm.ToolResultText(use.ID, "操作准入失败，当前出口策略已不可用", true), nil
+	}
 	res, err := t.Call(l.toolCtx, input, tc)
 	if err != nil {
 		res = tool.Errorf("Error: " + err.Error())

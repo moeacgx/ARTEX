@@ -516,7 +516,7 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	opts.BashEnv = browserRunEnvironment(opts.BashEnv)
 	defer closeRunBrowser(ctx, opts.WorkingDir, opts.BashEnv)
 	s := agentcore.NewSession(opts)
-	defer s.Close() // release the session's background-task manager (temp dir + processes)
+	defer closeProxySession(ctx, s)
 
 	// Resume prior conversation if this intent was paused/blocked/exhausted and is
 	// being re-run. The transcript ID is deterministic per intent, so if a prior

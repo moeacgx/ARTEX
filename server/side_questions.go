@@ -207,6 +207,49 @@ func (s *Server) sideProvider(model sidequestion.Model) (llm.Provider, error) {
 	return p, nil
 }
 
+// 旁路问答同样属于主体的真实运行；摘要和回答都必须沿用已登记的出口。
+func (s *Server) admitSideProxy(ctx context.Context, parent sidequestion.Parent, model sidequestion.Model) (context.Context, llm.Provider, func(), error) {
+	finish := func() {}
+	var task *Task
+	if parent.ConversationID > 0 {
+		next, policy, done, err := s.beginConversationProxy(ctx, parent.ConversationID)
+		if err != nil {
+			return ctx, nil, finish, err
+		}
+		ctx, finish, task = next, done, proxySubjectRuntimeTask(policy)
+	} else {
+		id := strconv.FormatInt(parent.TaskID, 10)
+		next, done, ok := s.engine.beginTaskOperationContext(ctx, id)
+		if !ok {
+			return ctx, nil, finish, db.ErrProxyInUse
+		}
+		ctx, finish = next, done
+		task, _ = s.m.Task(id)
+		if task == nil {
+			finish()
+			return ctx, nil, func() {}, db.ErrProxyUnavailable
+		}
+	}
+	provider, err := s.sideProvider(model)
+	if err == nil && model.ProfileID > 0 {
+		var ok bool
+		provider, _, ok = s.providerForTaskSelection(db.LLMModelSelection{ProfileID: model.ProfileID}, task, ctx)
+		if !ok {
+			err = db.ErrLLMModelUnavailable
+		}
+	} else if err == nil {
+		s.cfgMu.Lock()
+		cfg := s.llmCfg
+		s.cfgMu.Unlock()
+		provider, _, err = s.applyTaskLLMProxy(ctx, task, provider, cfg)
+	}
+	if err != nil {
+		finish()
+		return ctx, nil, func() {}, err
+	}
+	return ctx, provider, finish, nil
+}
+
 func (s *Server) sideParent(w http.ResponseWriter, r *http.Request, kind string) (sidequestion.Parent, bool) {
 	p := sidequestion.Parent{}
 	if s.side == nil || s.m.pg == nil {
@@ -462,7 +505,12 @@ func (s *Server) runSide(ctx context.Context, cancel context.CancelFunc, e sideq
 		}
 		return ok, nil
 	}
-	memory, runErr := s.m.pg.SideMemory(ctx, e)
+	ctx, provider, finish, runErr := s.admitSideProxy(ctx, parent, snapshot.Model)
+	defer finish()
+	var memory sidequestion.Memory
+	if runErr == nil {
+		memory, runErr = s.m.pg.SideMemory(ctx, e)
+	}
 	var answer sidequestion.Answer
 	if runErr == nil {
 		answer, e.Context, runErr = (sidequestion.SideQuestionService{Provider: provider}).Respond(ctx, snapshot, agentQuestion, sidequestion.Replay{

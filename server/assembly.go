@@ -98,7 +98,8 @@ func wireAgentAugment(pg *db.DB, skillDir string, hostTools func() ([]actool.Cor
 				if len(managers) > 0 {
 					var resolved *db.MCPServer
 					var err error
-					if agent.RunInfoFrom(ctx).TaskID > 0 {
+					_, hasProxySubject := ctx.Value(proxySubjectContextKey{}).(admittedProxySubject)
+					if agent.RunInfoFrom(ctx).TaskID > 0 || hasProxySubject {
 						resolved, err = managers[0].TaskMCPConfig(ctx, m)
 					} else {
 						resolved, err = managedBrowserConfig(m)
@@ -197,7 +198,9 @@ func wireAgentAugment(pg *db.DB, skillDir string, hostTools func() ([]actool.Cor
 
 		cleanup := func() {
 			for _, c := range closers {
-				_ = c.Close()
+				if err := c.Close(); err != nil {
+					agent.ReportProxyCleanupFailure(ctx)
+				}
 			}
 		}
 		def := agent.DeferredInfo{
@@ -313,6 +316,17 @@ func wireTools(pg *db.DB, domainReg map[string]actool.CoreTool) {
 		}
 		out := tools[:0:0]
 		for _, t := range tools {
+			if isProxyFailoverTool(t.Name()) {
+				// 主体使用授权独立于平台代理管理工具绑定权限。
+				formal, ok := ctx.Value(proxySubjectContextKey{}).(admittedProxySubject)
+				if ok {
+					policy, err := pg.GetProxyPolicy(formal.Subject)
+					if err == nil && policy.State.Mode == db.TaskProxyModeGroup && (t.Name() == "list_allowed_proxies" || policy.AgentFailoverEnabled) {
+						out = append(out, t)
+					}
+				}
+				continue
+			}
 			row, known := byKey[t.Name()]
 			if !known { // MCP/skill/host tool: no row → untouched
 				if isProxyCenterTool(t.Name()) {

@@ -1,6 +1,7 @@
 package db
 
 import (
+	"context"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
@@ -42,6 +43,7 @@ const (
 	TaskProxyModeInherit TaskProxyMode = "inherit"
 	TaskProxyModeDirect  TaskProxyMode = "direct"
 	TaskProxyModeFixed   TaskProxyMode = "fixed"
+	TaskProxyModeGroup   TaskProxyMode = "group"
 )
 
 type Proxy struct {
@@ -242,7 +244,7 @@ func NormalizeTaskProxyMode(mode TaskProxyMode) (TaskProxyMode, error) {
 		return TaskProxyModeInherit, nil
 	}
 	switch mode {
-	case TaskProxyModeInherit, TaskProxyModeDirect, TaskProxyModeFixed:
+	case TaskProxyModeInherit, TaskProxyModeDirect, TaskProxyModeFixed, TaskProxyModeGroup:
 		return mode, nil
 	default:
 		return "", fmt.Errorf("%w: %q", ErrProxyInvalidMode, mode)
@@ -381,9 +383,14 @@ func insertProxyTx(tx *sql.Tx, p *Proxy) (*Proxy, error) {
 	if e != nil {
 		return nil, e
 	}
-	return scanProxy(tx.QueryRow(`INSERT INTO outbound_proxies(name,kind,url,host,port,username,password,resin_platform,resin_admin_url,resin_admin_token,enabled,status,protocol)
+	out, err := scanProxy(tx.QueryRow(`INSERT INTO outbound_proxies(name,kind,url,host,port,username,password,resin_platform,resin_admin_url,resin_admin_token,enabled,status,protocol)
 VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
 RETURNING id,name,kind,url,host,port,username,password,resin_platform,resin_admin_url,resin_admin_token,enabled,status,last_error,last_checked_at,created_at,updated_at,protocol`, p.Name, p.Kind, encURL, p.Host, p.Port, p.Username, encPassword, p.ResinPlatform, p.ResinAdminURL, encToken, p.Enabled, initialProxyStatus(p), p.Protocol))
+	if err != nil || out.Kind != ProxyKindWarp {
+		return out, err
+	}
+	_, err = tx.Exec(`INSERT INTO warp_proxy_health(proxy_id,state) VALUES($1,'unknown') ON CONFLICT DO NOTHING`, out.ID)
+	return out, err
 }
 
 func (d *DB) UpdateProxy(p *Proxy) (*Proxy, error) {
@@ -493,6 +500,14 @@ func (d *DB) UpdateProxyWithOptions(p *Proxy, opts ProxyUpdateOptions) (*Proxy, 
 		if err != nil {
 			return err
 		}
+		if existing.Kind == ProxyKindWarp {
+			if err = CheckWarpHealthMutationTx(context.Background(), tx, p.ID); err != nil {
+				return err
+			}
+			if existing.Status != ProxyStatusStopped {
+				return ErrProxyInUse
+			}
+		}
 		inUse, err := proxyInUseTx(tx, p.ID)
 		if err != nil {
 			return err
@@ -524,6 +539,9 @@ func (d *DB) UpdateProxyWithOptions(p *Proxy, opts ProxyUpdateOptions) (*Proxy, 
 		if err := ValidateProxy(&copy); err != nil {
 			return err
 		}
+		if (existing.Kind == ProxyKindWarp) != (copy.Kind == ProxyKindWarp) {
+			return ErrProxyInvalidKind
+		}
 		encURL, err := encryptProxySecret(copy.URL)
 		if err != nil {
 			return err
@@ -538,7 +556,14 @@ func (d *DB) UpdateProxyWithOptions(p *Proxy, opts ProxyUpdateOptions) (*Proxy, 
 		}
 		out, err = scanProxy(tx.QueryRow(`UPDATE outbound_proxies SET name=$2,kind=$3,url=$4,host=$5,port=$6,username=$7,password=$8,resin_platform=$9,resin_admin_url=$10,resin_admin_token=$11,enabled=$12,status=$13,last_error='',last_checked_at=NULL,protocol=$14 WHERE id=$1
 RETURNING id,name,kind,url,host,port,username,password,resin_platform,resin_admin_url,resin_admin_token,enabled,status,last_error,last_checked_at,created_at,updated_at,protocol`, copy.ID, copy.Name, copy.Kind, encURL, copy.Host, copy.Port, copy.Username, encPass, copy.ResinPlatform, copy.ResinAdminURL, encToken, copy.Enabled, initialProxyStatus(&copy), copy.Protocol))
-		return err
+		if err != nil || out.Kind != ProxyKindWarp {
+			return err
+		}
+		state, err := healthTx(context.Background(), tx, out.ID)
+		if err != nil {
+			return err
+		}
+		return SyncWarpHealthIntentTx(context.Background(), tx, out.ID, WarpHealthIntent{Desired: state.Desired, Material: state.Material, ProfileRevision: state.ProfileRevision})
 	})
 	return out, err
 }
@@ -550,34 +575,24 @@ func (d *DB) DeleteProxy(id int64) error {
 // DeleteProxyWithCleanup 与任务创建及渠道绑定共享锁，在不可回滚的文件清理前检查引用。
 func (d *DB) DeleteProxyWithCleanup(id int64, cleanup func(*Proxy) error) error {
 	return d.withProxyLifecycle(func(tx *sql.Tx) error {
-		globalID, err := globalProxyIDTx(tx)
+		proxy, err := getProxyTx(tx, id)
 		if err != nil {
 			return err
 		}
-		if globalID != nil && *globalID == id {
-			return ErrProxyInUse
+		if proxy.Kind == ProxyKindWarp {
+			if err = CheckWarpHealthMutationTx(context.Background(), tx, id); err != nil {
+				return err
+			}
+			state, err := healthTx(context.Background(), tx, id)
+			if err != nil {
+				return err
+			}
+			if state.Claim.Token != "" {
+				return ErrWarpHealthBlocked
+			}
 		}
-		inUse, err := proxyInUseTx(tx, id)
-		if err != nil {
+		if err := checkProxyDeleteReferencesTx(tx, id); err != nil {
 			return err
-		}
-		if inUse {
-			return ErrProxyInUse
-		}
-		// FK 拒绝发生在 SQL 删除时已太晚；先保护运行器档案，再保留 FK 兜底。
-		var channelReferenced bool
-		if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM llm_profiles WHERE proxy_id=$1)`, id).Scan(&channelReferenced); err != nil {
-			return err
-		}
-		if channelReferenced {
-			return ErrProxyInUse
-		}
-		pending, err := warpCreatePendingTx(tx, id)
-		if err != nil {
-			return err
-		}
-		if pending {
-			return ErrProxyInUse
 		}
 		if cleanup != nil {
 			p, err := getProxyTx(tx, id)
@@ -606,6 +621,40 @@ func (d *DB) DeleteProxyWithCleanup(id int64, cleanup func(*Proxy) error) error 
 	})
 }
 
+// checkProxyDeleteReferencesTx 在生命周期事务里先挡住所有静态和活动引用。
+// WARP 删除会在网络清理前、提交前各检查一次，避免删掉仍被引用的运行材料。
+func checkProxyDeleteReferencesTx(tx *sql.Tx, id int64) error {
+	globalID, err := globalProxyIDTx(tx)
+	if err != nil {
+		return err
+	}
+	if globalID != nil && *globalID == id {
+		return ErrProxyInUse
+	}
+	inUse, err := proxyInUseTx(tx, id)
+	if err != nil {
+		return err
+	}
+	if inUse {
+		return ErrProxyInUse
+	}
+	var referenced bool
+	if err = tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM llm_profiles WHERE proxy_id=$1) OR EXISTS(SELECT 1 FROM proxy_group_members WHERE proxy_id=$1)`, id).Scan(&referenced); err != nil {
+		return err
+	}
+	if referenced {
+		return ErrProxyInUse
+	}
+	pending, err := warpCreatePendingTx(tx, id)
+	if err != nil {
+		return err
+	}
+	if pending {
+		return ErrProxyInUse
+	}
+	return nil
+}
+
 func (d *DB) SetProxyStatus(id int64, status, lastError string, checkedAt time.Time) error {
 	return d.withProxyLifecycle(func(tx *sql.Tx) error {
 		pending, err := warpCreatePendingTx(tx, id)
@@ -632,6 +681,9 @@ func (d *DB) SetGlobalProxyID(id *int64) error {
 				return err
 			}
 			if err := usableProxy(p); err != nil {
+				return err
+			}
+			if err := CheckWarpHealthAdmissionTx(context.Background(), tx, p.ID); err != nil {
 				return err
 			}
 		}

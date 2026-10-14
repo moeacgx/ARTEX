@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"os"
+	"reflect"
 	"strconv"
 
 	"github.com/Autumn-27/artex/db"
@@ -69,7 +70,7 @@ func (m *Manager) confirmTaskLeaseReleased(t *Task) error {
 		return err
 	}
 	var record resinLeaseRecord
-	if json.Unmarshal(b, &record) != nil || record.Snapshot.ID != t.proxyState().Snapshot.ID {
+	if json.Unmarshal(b, &record) != nil || !reflect.DeepEqual(record.Snapshot, t.proxyState().Snapshot) {
 		return db.ErrProxySwitchRecovery
 	}
 	if record.State != "uncertain" && record.State != "releasing" && record.State != "released" {
@@ -95,7 +96,7 @@ func (t *Task) setProxyState(s db.TaskProxyState) {
 }
 
 func (s *Server) registerTaskProxyRoutes(mux *http.ServeMux) {
-	mux.HandleFunc("PUT /api/tasks/{id}/proxy", s.switchTaskProxy)
+	mux.HandleFunc("PUT /api/tasks/{id}/proxy", s.setSubjectProxy)
 	mux.HandleFunc("POST /api/tasks/{id}/proxy/recovery", s.recoverTaskProxy)
 }
 
@@ -234,6 +235,13 @@ func (m *Manager) recoverTaskProxy(ctx context.Context, id string, expected int6
 	n, err := strconv.ParseInt(id, 10, 64)
 	if err != nil || n <= 0 {
 		return nil, sql.ErrNoRows
+	}
+	policy, err := m.pg.GetProxyPolicy(db.ProxySubject{Kind: "task", ID: n})
+	if err != nil {
+		return nil, err
+	}
+	if policy.State.Mode == db.TaskProxyModeGroup || policy.SwitchToken != "" {
+		return nil, db.ErrProxySwitchRecovery
 	}
 	b := m.taskProxyBarrier(id)
 	b.mu.Lock()

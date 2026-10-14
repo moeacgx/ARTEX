@@ -70,6 +70,10 @@ func (e taskOperationAdmissionError) Error() string {
 }
 
 func (e *Engine) beginTaskOperationError(ctx context.Context, taskID string) error {
+	return e.beginTaskOperationState(ctx, taskID, nil)
+}
+
+func (e *Engine) beginTaskOperationState(ctx context.Context, taskID string, admitted *db.TaskProxyState) error {
 	b := e.proxyBarrier(taskID)
 	b.mu.Lock()
 	for b.releasing {
@@ -101,14 +105,17 @@ func (e *Engine) beginTaskOperationError(ctx context.Context, taskID string) err
 			log.Printf("[proxy] 任务 %s 操作准入失败: %v", taskID, err)
 			return taskOperationAdmissionError{cause: err}
 		}
+		if admitted != nil {
+			*admitted = state
+		}
 		if task, ok := e.m.Task(taskID); ok {
 			if err = e.m.refreshTaskProxyState(task, state); err != nil {
-				_ = e.m.pg.ReleaseTaskOperation(id)
+				_ = e.m.pg.ReleaseTaskOperationToken(id, state.OperationToken)
 				return taskOperationAdmissionError{cause: err}
 			}
 		}
 		if err := ctx.Err(); err != nil {
-			if releaseErr := e.m.pg.ReleaseTaskOperation(id); releaseErr != nil {
+			if releaseErr := e.m.pg.ReleaseTaskOperationToken(id, state.OperationToken); releaseErr != nil {
 				log.Printf("[proxy] 任务 %s 已取消准入的占用解除失败: %v", taskID, releaseErr)
 			}
 			return err
@@ -119,13 +126,21 @@ func (e *Engine) beginTaskOperationError(ctx context.Context, taskID string) err
 }
 
 func (e *Engine) decInflight(taskID string) {
+	e.decInflightToken(taskID, "")
+}
+
+func (e *Engine) decInflightToken(taskID, token string) {
 	b := e.proxyBarrier(taskID)
 	b.mu.Lock()
 	if e.m != nil && e.m.pg != nil {
 		id, err := strconv.ParseInt(taskID, 10, 64)
 		if err == nil {
-			if err = e.m.pg.ReleaseTaskOperation(id); err != nil {
+			if err = e.m.pg.ReleaseTaskOperationToken(id, token); err != nil {
 				log.Printf("[proxy] 任务 %s 操作占用解除失败: %v", taskID, err)
+				if errors.Is(err, db.ErrProxyActivityToken) {
+					b.mu.Unlock()
+					return
+				}
 			}
 		}
 	}

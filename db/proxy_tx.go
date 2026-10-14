@@ -57,6 +57,16 @@ func (d *DB) acquireTaskProxyActivity(taskID int64, requireIdle bool) error {
 }
 
 func acquireTaskProxyActivityTx(tx *sql.Tx, taskID int64, requireIdle bool) error {
+	policy, err := proxyPolicyTx(tx, ProxySubject{Kind: "task", ID: taskID})
+	if err != nil {
+		return err
+	}
+	if err = proxyPolicyBarrierTx(tx, policy); err != nil {
+		return err
+	}
+	if err = validateProxyPolicyTx(tx, policy); err != nil {
+		return err
+	}
 	var blocked bool
 	if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM task_operation_activity WHERE task_id=$1 AND (switch_token<>'' OR ($2 AND active_count>0)))`, taskID, requireIdle).Scan(&blocked); err != nil {
 		return err
@@ -109,6 +119,11 @@ func acquireTaskProxyActivityTx(tx *sql.Tx, taskID int64, requireIdle bool) erro
 	}
 	if err := usableProxy(p); err != nil {
 		return err
+	}
+	if !requireIdle {
+		if err := CheckWarpHealthAdmissionTx(context.Background(), tx, id); err != nil {
+			return err
+		}
 	}
 	result, err := tx.Exec(`INSERT INTO task_proxy_activity(task_id,proxy_id,active_count,exclusive_release) VALUES($1,$2,1,$3)
 ON CONFLICT(task_id) DO UPDATE SET active_count=task_proxy_activity.active_count+1
@@ -194,7 +209,7 @@ func (d *DB) WithIdleProxy(id int64, fn func(*Proxy) error) (*Proxy, error) {
 
 // ProxyTerminalTasks 仅返回允许人工回收租约的结束任务；不隐式回收运行任务。
 func (d *DB) ProxyTerminalTasks(id int64, taskID string) ([]*Task, error) {
-	rows, err := d.Query(`SELECT id,proxy_mode,proxy_snapshot FROM tasks WHERE proxy_id=$1 AND status IN ('done','failed','timeout') AND ($2='' OR id::text=$2)`, id, taskID)
+	rows, err := d.Query(`SELECT id,proxy_mode,proxy_snapshot,proxy_revision FROM tasks WHERE proxy_id=$1 AND status IN ('done','failed','timeout') AND ($2='' OR id::text=$2)`, id, taskID)
 	if err != nil {
 		return nil, err
 	}
@@ -203,7 +218,7 @@ func (d *DB) ProxyTerminalTasks(id int64, taskID string) ([]*Task, error) {
 	for rows.Next() {
 		var t Task
 		var raw []byte
-		if err := rows.Scan(&t.ID, &t.ProxyMode, &raw); err != nil {
+		if err := rows.Scan(&t.ID, &t.ProxyMode, &raw, &t.ProxyRevision); err != nil {
 			return nil, err
 		}
 		if err := json.Unmarshal(raw, &t.ProxySnapshot); err != nil {
@@ -314,7 +329,11 @@ func proxyInUseTx(tx *sql.Tx, id int64) (bool, error) {
 	var used bool
 	err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM tasks WHERE proxy_id=$1 AND deleted_at IS NULL AND status NOT IN ('done','failed','timeout'))
 OR EXISTS(SELECT 1 FROM task_proxy_activity WHERE proxy_id=$1 AND active_count>0)
-OR EXISTS(SELECT 1 FROM task_operation_activity a JOIN tasks t ON t.id=a.task_id WHERE a.switch_token<>'' AND (a.target_id=$1 OR t.proxy_id=$1))`, id).Scan(&used)
+OR EXISTS(SELECT 1 FROM task_operation_activity a JOIN tasks t ON t.id=a.task_id WHERE a.switch_token<>'' AND (a.target_id=$1 OR t.proxy_id=$1))
+OR EXISTS(SELECT 1 FROM proxy_subject_activity WHERE proxy_id=$1)
+OR EXISTS(SELECT 1 FROM conversations WHERE proxy_id=$1)
+OR EXISTS(SELECT 1 FROM proxy_subject_policies p LEFT JOIN tasks t ON t.id=p.task_id LEFT JOIN conversations c ON c.id=p.conversation_id WHERE p.switch_token<>'' AND (p.reserved_proxy_id=$1 OR t.proxy_id=$1 OR c.proxy_id=$1))
+OR EXISTS(SELECT 1 FROM proxy_switch_requests WHERE state IN ('pending','draining','applying','recovery_required') AND (from_proxy_id=$1 OR to_proxy_id=$1))`, id).Scan(&used)
 	return used, err
 }
 

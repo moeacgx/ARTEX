@@ -44,7 +44,8 @@ type taskProxyTicket struct {
 }
 
 func (e *Engine) beginTaskOperationContext(ctx context.Context, id string) (context.Context, func(), bool) {
-	if ctx == nil || e.beginTaskOperationError(ctx, id) != nil {
+	var state db.TaskProxyState
+	if ctx == nil || e.beginTaskOperationState(ctx, id, &state) != nil {
 		return ctx, func() {}, false
 	}
 	ticket := &taskProxyTicket{manager: e.m, taskID: id, ctx: ctx}
@@ -68,10 +69,20 @@ func (e *Engine) beginTaskOperationContext(ctx context.Context, id string) (cont
 				log.Printf("[proxy] 任务 %s 浏览器未确认退出，保留操作占用", id)
 				return
 			}
-			e.decInflight(id)
+			e.decInflightToken(id, state.OperationToken)
 		})
 	}
-	return context.WithValue(ctx, taskProxyTicketKey{}, ticket), finish, true
+	ctx = context.WithValue(ctx, taskProxyTicketKey{}, ticket)
+	if e.m != nil && e.m.pg != nil {
+		idNum, err := strconv.ParseInt(id, 10, 64)
+		if err == nil {
+			policy, err := e.m.pg.GetProxyPolicy(db.ProxySubject{Kind: "task", ID: idNum})
+			if err == nil {
+				ctx = e.m.withProxySubject(ctx, policy)
+			}
+		}
+	}
+	return ctx, finish, true
 }
 
 // 只有仍存活的准入凭证可重新申请已回收租约；任务 ID 和计数不能构成证明。
@@ -121,7 +132,7 @@ func (m *Manager) releaseTaskProxyOccupied(ctx context.Context, t *Task) (result
 	}
 	defer executor.Close()
 	if m.pg != nil {
-		if err := executor.AcquireIdleTaskProxyActivity(); err != nil {
+		if err := executor.AcquireIdleTaskProxyActivityRevision(t.proxyState().Revision); err != nil {
 			return err
 		}
 		defer func() {
@@ -149,6 +160,10 @@ func (e *Engine) requestProxyRelease(id string, force bool) {
 	}
 	b.pending = true
 	b.mu.Unlock()
+	var releaseState db.TaskProxyState
+	if task, ok := e.m.Task(id); ok {
+		releaseState = task.proxyState()
+	}
 	go func() {
 		b.mu.Lock()
 		for e.inflightCount(id) > 0 || b.releasing {
@@ -158,7 +173,7 @@ func (e *Engine) requestProxyRelease(id string, force bool) {
 			b.mu.Lock()
 		}
 		task, ok := e.m.Task(id)
-		if !ok || (!b.force && !e.IsPaused(id) && !isTerminalStatus(task.lifecycleSnapshot().Status)) {
+		if !ok || task.proxyState().Revision != releaseState.Revision || (!b.force && !e.IsPaused(id) && !isTerminalStatus(task.lifecycleSnapshot().Status)) {
 			b.pending = false
 			b.force = false
 			b.signal()
@@ -168,7 +183,9 @@ func (e *Engine) requestProxyRelease(id string, force bool) {
 		b.releasing = true
 		b.mu.Unlock()
 		ctx, cancel := context.WithTimeout(context.Background(), proxyReleaseTimeout)
-		if err := e.m.releaseTaskProxyOccupied(ctx, task); err != nil {
+		releaseTask := &Task{ID: id}
+		releaseTask.setProxyState(releaseState)
+		if err := e.m.releaseTaskProxyOccupied(ctx, releaseTask); err != nil && !errors.Is(err, db.ErrProxyInUse) && !errors.Is(err, db.ErrProxyRevisionConflict) {
 			log.Printf("[proxy] 任务 %s 出口回收失败: %v", id, err)
 		}
 		cancel()

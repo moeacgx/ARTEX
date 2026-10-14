@@ -27,7 +27,7 @@ import (
 // messages, not dozens of fragments.
 func captureRun(ctx context.Context, opts agentcore.Options, input string, emit func(db.Activity)) (string, harness.TerminalReason, error) {
 	s := agentcore.NewSession(opts)
-	defer s.Close() // release the session's background-task manager (temp dir + processes)
+	defer closeProxySession(ctx, s)
 	return captureRunSession(ctx, s, input, emit)
 }
 
@@ -110,6 +110,10 @@ func captureRunSession(ctx context.Context, s *agentcore.Session, input string, 
 			auditTrace.Complete(ev.ToolResult.ToolUseID, out, ev.ToolResult.IsError)
 			rec(db.Activity{Kind: "tool_result", Tool: toolNames[ev.ToolResult.ToolUseID], ToolUseID: ev.ToolResult.ToolUseID,
 				IsError: ev.ToolResult.IsError, Summary: firstLine(out, 200), Detail: out})
+			if ProxyRunStopRequested(ctx) {
+				// 切换工具只登记意图；退出本轮并让 Session/MCP/browser 清理全部完成。
+				return out, harness.ReasonHookStopped, nil
+			}
 		case harness.KindText:
 			addDelta("text", ev.Text)
 		case harness.KindThinking:

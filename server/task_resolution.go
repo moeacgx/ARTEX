@@ -68,7 +68,7 @@ func (s *Server) resolutionFromSelection(p *db.LLMProfile, selection db.LLMModel
 		proxyState := task.proxyState()
 		if proxyState.Mode == db.TaskProxyModeDirect {
 			cfg.Proxy = ""
-		} else if proxyState.Mode == db.TaskProxyModeFixed || cfg.Proxy == "" {
+		} else if proxyState.Mode == db.TaskProxyModeFixed || proxyState.Mode == db.TaskProxyModeGroup || cfg.Proxy == "" {
 			taskCopy := &Task{ID: task.ID}
 			taskCopy.setProxyState(proxyState)
 			snapshot, err := s.m.runtimeSnapshot(taskCopy)

@@ -2,10 +2,15 @@ package server
 
 import (
 	"context"
+	"crypto/tls"
+	"encoding/json"
 	"fmt"
 	"log"
+	"net/http"
+	"strings"
 	"time"
 
+	"github.com/Autumn-27/artex/agent"
 	"github.com/Autumn-27/artex/db"
 	"github.com/Autumn-27/artex/mcphttp"
 	"github.com/Autumn-27/norma/mcp"
@@ -22,6 +27,56 @@ type mcpClient interface {
 
 // connectMCP dials one MCP server per its transport. Callers must Close the client.
 func connectMCP(ctx context.Context, m *db.MCPServer) (mcpClient, error) {
+	if formal, ok := ctx.Value(proxySubjectContextKey{}).(admittedProxySubject); ok {
+		policy, err := formal.Manager.pg.GetProxyPolicy(formal.Subject)
+		if err != nil {
+			return nil, err
+		}
+		if err = formal.Manager.pg.ValidateProxyPolicy(formal.Subject); err != nil {
+			return nil, err
+		}
+		if m.Transport == "stdio" && m.Name != browserMCPName {
+			addr, ca, err := formal.Manager.TaskToolProxy(ctx, proxySubjectRuntimeTask(policy))
+			if err != nil {
+				return nil, err
+			}
+			copy := *m
+			env := jsonStrMap(m.Env)
+			for _, entry := range agent.ProxyEnvironment(addr, ca) {
+				key, value, _ := strings.Cut(entry, "=")
+				env[key] = value
+			}
+			copy.Env, _ = json.Marshal(env)
+			m = &copy
+		} else if m.Transport == "http" || m.Transport == "sse" {
+			s := &Server{m: formal.Manager}
+			transport, err := s.taskHTTPTransport(ctx, httpExec{}, nil)
+			if err != nil {
+				return nil, err
+			}
+			if m.Insecure {
+				if transport.TLSClientConfig == nil {
+					transport.TLSClientConfig = &tls.Config{}
+				}
+				transport.TLSClientConfig.InsecureSkipVerify = true
+			}
+			proxy := ""
+			if transport.Proxy != nil {
+				request, err := http.NewRequest(http.MethodGet, m.URL, nil)
+				if err != nil {
+					return nil, err
+				}
+				selected, err := transport.Proxy(request)
+				if err != nil {
+					return nil, err
+				}
+				if selected != nil {
+					proxy = selected.String()
+				}
+			}
+			ctx = mcphttp.WithHTTPClient(ctx, &http.Client{Transport: proxyObservedTransport{base: transport, ctx: ctx, proxy: proxy}, Timeout: 120 * time.Second})
+		}
+	}
 	switch m.Transport {
 	case "stdio":
 		if m.Command == "" {

@@ -2,11 +2,13 @@ package server
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -28,7 +30,7 @@ func ResolveTaskProxy(mode db.TaskProxyMode, fixed, global *db.Proxy) (*db.Proxy
 	switch normalized {
 	case db.TaskProxyModeDirect:
 		return nil, nil
-	case db.TaskProxyModeFixed:
+	case db.TaskProxyModeFixed, db.TaskProxyModeGroup:
 		return usableTaskProxy(fixed)
 	case db.TaskProxyModeInherit:
 		if global == nil {
@@ -58,6 +60,7 @@ type proxyRuntimeState struct {
 	dir     string
 	routes  map[string]*traffic.TaskRoute
 	bridges map[string]*egress.HTTPBridge
+	health  *WarpHealthController
 }
 
 func (rt *proxyRuntimeState) taskLock(id string) *sync.Mutex {
@@ -88,6 +91,9 @@ func (m *Manager) InitProxyRuntime(ctx context.Context) error {
 	if err := m.pg.MigrateTaskProxySwitch(); err != nil {
 		return err
 	}
+	if err := m.pg.MigrateWarpHealth(ctx); err != nil {
+		return err
+	}
 	if err := m.pg.MigrateLegacyProxy(); err != nil {
 		return err
 	}
@@ -102,20 +108,60 @@ func (m *Manager) InitProxyRuntime(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if err = warp.Restore(ctx); err != nil {
+	controller, err := NewWarpHealthController(m.pg, warp, db.DefaultWarpHealthPolicy())
+	if err != nil {
 		warp.Close()
-		return errors.New("WARP 恢复失败")
+		return err
 	}
-	proxyRuntimes.Store(m, &proxyRuntimeState{warp: warp, dir: filepath.Join(m.dir, "egress", "leases"), routes: map[string]*traffic.TaskRoute{}, bridges: map[string]*egress.HTTPBridge{}})
+	ids, err := m.pg.WarpHealthProxyIDs(ctx)
+	if err != nil {
+		warp.Close()
+		return err
+	}
+	for _, id := range ids {
+		if err = controller.ImportProfile(ctx, id); err != nil {
+			warp.Close()
+			return err
+		}
+	}
+	controller.SetRepairGuard(m.warpHealthRepairGuard)
+	if err = controller.Start(ctx); err != nil {
+		warp.Close()
+		return err
+	}
+	proxyRuntimes.Store(m, &proxyRuntimeState{warp: warp, health: controller, dir: filepath.Join(m.dir, "egress", "leases"), routes: map[string]*traffic.TaskRoute{}, bridges: map[string]*egress.HTTPBridge{}})
+	m.startProxyFailover(ctx)
 	return nil
 }
 
 func (m *Manager) CloseProxyRuntime() error {
-	v, ok := proxyRuntimes.LoadAndDelete(m)
+	m.closeProxyFailover()
+	v, ok := proxyRuntimes.Load(m)
 	if !ok {
 		return nil
 	}
 	rt := v.(*proxyRuntimeState)
+	var healthErr error
+	if rt.health != nil {
+		closeCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		healthErr = rt.health.Close(closeCtx)
+		cancel()
+	}
+	if healthErr != nil {
+		return healthErr
+	}
+	ids, err := m.pg.WarpHealthProxyIDs(context.Background())
+	if err != nil {
+		return err
+	}
+	for _, id := range ids {
+		if err = m.pg.WithWarpHealthLifecycle(context.Background(), func(tx *sql.Tx) error {
+			return db.WarpHealthIdleTx(context.Background(), tx, id)
+		}); err != nil {
+			return err
+		}
+	}
+	proxyRuntimes.Delete(m)
 	rt.mu.Lock()
 	rt.closed = true
 	routes, bridges := rt.routes, rt.bridges
@@ -128,7 +174,23 @@ func (m *Manager) CloseProxyRuntime() error {
 	for _, bridge := range bridges {
 		_ = bridge.Close()
 	}
-	return rt.warp.Close()
+	return errors.Join(healthErr, rt.warp.Close())
+}
+
+func (m *Manager) warpHealthRepairGuard(ctx context.Context, tx *sql.Tx, id int64) error {
+	if err := db.WarpHealthIdleTx(ctx, tx, id); err != nil {
+		return err
+	}
+	var busy bool
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM proxy_subject_activity WHERE proxy_id=$1)
+OR EXISTS(SELECT 1 FROM proxy_subject_policies WHERE reserved_proxy_id=$1 AND switch_token<>'')
+OR EXISTS(SELECT 1 FROM proxy_switch_requests WHERE state IN ('pending','draining','applying','recovery_required') AND (from_proxy_id=$1 OR to_proxy_id=$1))`, id).Scan(&busy); err != nil {
+		return err
+	}
+	if busy {
+		return db.ErrProxyInUse
+	}
+	return nil
 }
 
 func snapshotProxyURL(s db.ProxySnapshot, taskID string) string {
@@ -149,7 +211,7 @@ func (m *Manager) runtimeSnapshot(t *Task) (db.ProxySnapshot, error) {
 		return db.ProxySnapshot{}, nil
 	}
 	if state.Snapshot.ID == 0 {
-		if state.Mode == db.TaskProxyModeFixed || state.ID != nil {
+		if state.Mode == db.TaskProxyModeFixed || state.Mode == db.TaskProxyModeGroup || state.ID != nil {
 			return db.ProxySnapshot{}, db.ErrProxyUnavailable
 		}
 		return db.ProxySnapshot{}, nil
@@ -263,7 +325,7 @@ func (m *Manager) ResolveLLMProxySelection(ctx context.Context, t *Task, legacyU
 		if err != nil {
 			return "", err
 		}
-		if taskMode == db.TaskProxyModeDirect || taskMode == db.TaskProxyModeFixed {
+		if taskMode == db.TaskProxyModeDirect || taskMode == db.TaskProxyModeFixed || taskMode == db.TaskProxyModeGroup {
 			return m.ResolveLLMProxy(ctx, t, "")
 		}
 	}
@@ -317,7 +379,7 @@ func (m *Manager) ResolveLLMProxy(ctx context.Context, t *Task, channelProxy str
 	if t != nil && t.proxyState().Mode == db.TaskProxyModeDirect {
 		return "", nil
 	}
-	if (t == nil || t.proxyState().Mode != db.TaskProxyModeFixed) && strings.TrimSpace(channelProxy) != "" {
+	if (t == nil || (t.proxyState().Mode != db.TaskProxyModeFixed && t.proxyState().Mode != db.TaskProxyModeGroup)) && strings.TrimSpace(channelProxy) != "" {
 		if _, err := egress.ProxyURL(channelProxy); err != nil {
 			return "", err
 		}
@@ -406,7 +468,7 @@ func (m *Manager) prepareResinLease(ctx context.Context, rt *proxyRuntimeState, 
 			return errors.New("Resin 租约状态不明确，拒绝自动重新使用")
 		}
 		if record.State == "active" {
-			if record.Snapshot.ID != s.ID {
+			if record.Snapshot.ID != s.ID || !reflect.DeepEqual(record.Snapshot, t.proxyState().Snapshot) {
 				return errors.New("旧 Resin 租约尚未回收，拒绝替换身份")
 			}
 			return nil
@@ -440,6 +502,10 @@ func (m *Manager) ReleaseTaskProxy(ctx context.Context, t *Task) error {
 	}
 	rt, err := m.proxyRuntime()
 	if err != nil {
+		if t.proxyState().Snapshot.Kind != db.ProxyKindResin {
+			// 运行时已整体关闭时，普通出口没有外部租约需要再次回收。
+			return nil
+		}
 		return err
 	}
 	lock := rt.taskLock(t.ID)
@@ -475,7 +541,7 @@ func (m *Manager) ReleaseTaskProxy(ctx context.Context, t *Task) error {
 	if json.Unmarshal(b, &record) != nil {
 		return errors.New("Resin 租约记录无效")
 	}
-	if record.Snapshot.ID != state.Snapshot.ID {
+	if record.Snapshot.ID != state.Snapshot.ID || !reflect.DeepEqual(record.Snapshot, state.Snapshot) {
 		return errors.New("Resin 租约身份与旧出口不一致")
 	}
 	if record.State == "released" {

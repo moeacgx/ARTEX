@@ -12,6 +12,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"iter"
 	"log"
 	"net/http"
 	"net/url"
@@ -280,7 +281,31 @@ func (c Config) NewProvider() (llm.Provider, error) {
 	if c.RatePerSecond > 0 || c.RatePerMinute > 0 {
 		lc.RateLimit = &llm.RateLimit{PerSecond: c.RatePerSecond, PerMinute: c.RatePerMinute}
 	}
-	return llm.NewProvider(lc)
+	provider, err := llm.NewProvider(lc)
+	if err != nil {
+		return nil, err
+	}
+	return &managedHTTPProvider{inner: provider, client: client}, nil
+}
+
+// 主体切换前后关闭旧空闲连接；活动连接仍由请求与真实返回控制。
+type managedHTTPProvider struct {
+	inner  llm.Provider
+	client *http.Client
+}
+
+func (p *managedHTTPProvider) CloseIdleConnections() { p.client.CloseIdleConnections() }
+func (p *managedHTTPProvider) Complete(ctx context.Context, req llm.CompletionRequest) (llm.Message, string, llm.Usage, error) {
+	return p.inner.Complete(ctx, req)
+}
+func (p *managedHTTPProvider) Stream(ctx context.Context, req llm.CompletionRequest) iter.Seq2[llm.StreamEvent, error] {
+	return p.inner.Stream(ctx, req)
+}
+func ProviderCloseIdle(provider llm.Provider) func() {
+	if p, ok := provider.(interface{ CloseIdleConnections() }); ok {
+		return p.CloseIdleConnections
+	}
+	return nil
 }
 
 // IsQuotaExhaustedMessage deliberately recognizes only explicit balance,
@@ -333,6 +358,12 @@ type quotaAwareTransport struct {
 	// carries; its value is the session id read from the request context. Empty
 	// disables it. See Config.SessionHeaderKey.
 	sessionHeaderKey string
+}
+
+func (t quotaAwareTransport) CloseIdleConnections() {
+	if c, ok := t.base.(interface{ CloseIdleConnections() }); ok {
+		c.CloseIdleConnections()
+	}
 }
 
 func (t quotaAwareTransport) RoundTrip(req *http.Request) (*http.Response, error) {

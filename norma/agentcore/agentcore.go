@@ -338,7 +338,11 @@ func NewSession(opts Options) *Session {
 // long-lived Session should defer Close; Run does so automatically.
 func (s *Session) Close() error {
 	if s.tasks != nil {
-		s.tasks.Cleanup()
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := s.tasks.CleanupContext(ctx); err != nil {
+			return err
+		}
 		s.tasks = nil
 	}
 	return nil

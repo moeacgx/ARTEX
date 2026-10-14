@@ -55,6 +55,9 @@ func mergeLLMProfileProxy(tx *sql.Tx, p, previous *LLMProfile) error {
 			if err := usableProxy(proxy); err != nil {
 				return err
 			}
+			if err := CheckWarpHealthAdmissionTx(context.Background(), tx, proxy.ID); err != nil {
+				return err
+			}
 			// 渠道还没有独立Resin租约生命周期，不能挤占任务工具租约。
 			if proxy.Kind == ProxyKindResin {
 				return ErrProxyUnavailable

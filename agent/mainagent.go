@@ -232,7 +232,7 @@ func (m *MainAgent) Chat(ctx context.Context, taskID int64, mainSeg int, as *db.
 	opts.BashEnv = browserRunEnvironment(opts.BashEnv)
 	defer closeRunBrowser(ctx, opts.WorkingDir, opts.BashEnv)
 	s := agentcore.NewSession(opts)
-	defer s.Close()
+	defer closeProxySession(ctx, s)
 	// reload the prior conversation from the transcript so the agent has context
 	// across turns (each Chat is a fresh session; without this it can't see earlier
 	// messages). First turn: no file yet → Resume loads nothing and proceeds.

@@ -459,6 +459,13 @@ func (s *Server) runHTTPTool(ctx context.Context, execRaw json.RawMessage, param
 	client := &http.Client{Timeout: timeoutOr(spec.TimeoutMs, 30000), Transport: tr}
 	resp, err := client.Do(req)
 	if err != nil {
+		if formal, ok := ctx.Value(proxySubjectContextKey{}).(admittedProxySubject); ok {
+			if policy, readErr := s.m.pg.GetProxyPolicy(formal.Subject); readErr == nil {
+				if snapshot, resolveErr := s.m.pg.ResolveProxySnapshot(policy.State.Snapshot); resolveErr == nil {
+					s.recordInfrastructureFailure(ctx, formal.Subject, formal.Revision, policy.State.ID, snapshot.URL, err)
+				}
+			}
+		}
 		return actool.Errorf("HTTP 请求失败，出口未回退直连"), nil
 	}
 	defer resp.Body.Close()
@@ -473,7 +480,17 @@ func (s *Server) runHTTPTool(ctx context.Context, execRaw json.RawMessage, param
 func (s *Server) taskHTTPTransport(ctx context.Context, spec httpExec, tc *actool.ToolContext) (*http.Transport, error) {
 	proxyStr := strings.TrimSpace(spec.Proxy)
 	var caFile string
-	if id := agent.RunInfoFrom(ctx).TaskID; id > 0 {
+	formal, hasFormal := ctx.Value(proxySubjectContextKey{}).(admittedProxySubject)
+	if hasFormal {
+		policy, err := s.m.pg.GetProxyPolicy(formal.Subject)
+		if err != nil {
+			return nil, err
+		}
+		proxyStr, caFile, err = s.m.TaskToolProxy(ctx, proxySubjectRuntimeTask(policy))
+		if err != nil {
+			return nil, err
+		}
+	} else if id := agent.RunInfoFrom(ctx).TaskID; id > 0 {
 		row, err := s.m.pg.GetTask(id)
 		if err != nil {
 			return nil, err
@@ -536,14 +553,25 @@ func hasProxyEnvironment(env []string) bool {
 
 func (s *Server) taskToolContext(ctx context.Context, tc *actool.ToolContext) (*actool.ToolContext, error) {
 	id := agent.RunInfoFrom(ctx).TaskID
-	if id <= 0 {
+	formal, hasFormal := ctx.Value(proxySubjectContextKey{}).(admittedProxySubject)
+	if id <= 0 && !hasFormal {
 		return tc, nil
 	}
-	row, err := s.m.pg.GetTask(id)
-	if err != nil {
-		return nil, err
+	var task *Task
+	if hasFormal {
+		policy, err := s.m.pg.GetProxyPolicy(formal.Subject)
+		if err != nil {
+			return nil, err
+		}
+		task = proxySubjectRuntimeTask(policy)
+	} else {
+		row, err := s.m.pg.GetTask(id)
+		if err != nil {
+			return nil, err
+		}
+		task = &Task{ID: strconv.FormatInt(id, 10), ProxyMode: row.ProxyMode, ProxyID: row.ProxyID, ProxySnapshot: row.ProxySnapshot}
 	}
-	addr, ca, err := s.m.TaskToolProxy(ctx, &Task{ID: strconv.FormatInt(id, 10), ProxyMode: row.ProxyMode, ProxyID: row.ProxyID, ProxySnapshot: row.ProxySnapshot})
+	addr, ca, err := s.m.TaskToolProxy(ctx, task)
 	if err != nil {
 		return nil, err
 	}

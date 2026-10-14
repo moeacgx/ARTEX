@@ -834,6 +834,9 @@ func (m *Manager) SetGlobalProxy(raw string) error {
 func (m *Manager) Close() error {
 	m.enrich.Close()
 	runtimeErr := m.CloseProxyRuntime()
+	if runtimeErr != nil {
+		return runtimeErr
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.traffic != nil {

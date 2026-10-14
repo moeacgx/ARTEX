@@ -46,3 +46,6 @@ func reportBrowserCleanupFailure(ctx context.Context) {
 		report()
 	}
 }
+
+// ReportProxyCleanupFailure 让 MCP 和浏览器共同遵守真实退出屏障。
+func ReportProxyCleanupFailure(ctx context.Context) { reportBrowserCleanupFailure(ctx) }

@@ -1,7 +1,9 @@
 package db
 
 import (
+	"context"
 	"database/sql"
+	"encoding/json"
 	"time"
 )
 
@@ -97,6 +99,9 @@ func (d *DB) CreateConversationSelection(agentKey, title string, selection *LLMM
 		return nil, err
 	}
 	defer tx.Rollback()
+	if err := lockProxyLifecycle(tx); err != nil {
+		return nil, err
+	}
 
 	// Insert the child without a profile first. The new row is exclusively owned
 	// by this transaction before it takes a profile lock, matching DeleteProfile's
@@ -105,6 +110,40 @@ func (d *DB) CreateConversationSelection(agentKey, title string, selection *LLMM
 INSERT INTO conversations(agent_key, title, llm_profile_id) VALUES ($1, $2, NULL)
 RETURNING `+convCols, agentKey, title))
 	if err != nil {
+		return nil, err
+	}
+	// inherit 在创建时保存默认出口，之后 GET 只读取已提交快照。
+	proxyID, err := globalProxyIDTx(tx)
+	if err != nil {
+		return nil, err
+	}
+	if proxyID != nil {
+		p, err := getProxyTx(tx, *proxyID)
+		if err != nil {
+			return nil, err
+		}
+		if err = usableProxy(p); err != nil {
+			return nil, err
+		}
+		if err = CheckWarpHealthAdmissionTx(context.Background(), tx, p.ID); err != nil {
+			return nil, err
+		}
+		if p.Kind == ProxyKindResin {
+			return nil, ErrProxyResinScope
+		}
+		snapshot, err := p.SnapshotEncrypted()
+		if err != nil {
+			return nil, err
+		}
+		raw, err := json.Marshal(snapshot)
+		if err != nil {
+			return nil, err
+		}
+		if _, err = tx.Exec(`UPDATE conversations SET proxy_id=$2,proxy_snapshot=$3 WHERE id=$1`, c.ID, *proxyID, raw); err != nil {
+			return nil, err
+		}
+	}
+	if _, err := ensureProxyPolicyTx(tx, ProxySubject{Kind: "conversation", ID: c.ID}); err != nil {
 		return nil, err
 	}
 	if err := lockLLMSelection(tx, selection); err != nil {
@@ -224,7 +263,7 @@ func (d *DB) TouchConversation(id int64) error {
 
 // DeleteConversation removes a thread; its activities cascade via FK.
 func (d *DB) DeleteConversation(id int64) error {
-	_, err := d.Exec(`DELETE FROM conversations WHERE id=$1`, id)
+	_, err := d.DeleteConversations([]int64{id})
 	return err
 }
 
@@ -234,20 +273,33 @@ func (d *DB) DeleteConversations(ids []int64) ([]int64, error) {
 	if len(ids) == 0 {
 		return []int64{}, nil
 	}
-	rows, err := d.Query(`DELETE FROM conversations WHERE id=ANY($1::bigint[]) RETURNING id`, ids)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
 	deleted := make([]int64, 0, len(ids))
-	for rows.Next() {
-		var id int64
-		if err := rows.Scan(&id); err != nil {
-			return nil, err
+	err := d.withProxyLifecycle(func(tx *sql.Tx) error {
+		// 取消请求不证明执行或清理退出；与活动登记共用事务锁后再删除。
+		for _, id := range ids {
+			var busy bool
+			if e := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM proxy_subject_policies p WHERE p.conversation_id=$1 AND (p.switch_token<>'' OR EXISTS(SELECT 1 FROM proxy_subject_activity a WHERE a.policy_id=p.id) OR EXISTS(SELECT 1 FROM proxy_switch_requests r WHERE r.policy_id=p.id AND r.state IN ('pending','draining','applying','recovery_required'))))`, id).Scan(&busy); e != nil {
+				return e
+			}
+			if busy {
+				return ErrProxyInUse
+			}
 		}
-		deleted = append(deleted, id)
-	}
-	return deleted, rows.Err()
+		rows, e := tx.Query(`DELETE FROM conversations WHERE id=ANY($1::bigint[]) RETURNING id`, ids)
+		if e != nil {
+			return e
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var id int64
+			if e = rows.Scan(&id); e != nil {
+				return e
+			}
+			deleted = append(deleted, id)
+		}
+		return rows.Err()
+	})
+	return deleted, err
 }
 
 // AppendConvActivity records one step of a conversation (human message or an agent

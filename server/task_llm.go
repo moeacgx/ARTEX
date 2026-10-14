@@ -210,20 +210,21 @@ func (s *Server) applyTaskLLMProxy(ctx context.Context, t *Task, prov llm.Provid
 		return nil, cfg, err
 	}
 	if cfg.Proxy == override {
-		return prov, cfg, nil
+		return s.guardProxyProvider(t, prov, cfg.Proxy, finalLLMProxyID(t, channelProxy, channelMode, channelProxyID, override), agent.ProviderCloseIdle(prov)), cfg, nil
 	}
 	cfg.Proxy = override
 	next, err := cfg.NewProvider()
 	if err != nil {
 		return nil, cfg, fmt.Errorf("build task LLM proxy: %w", err)
 	}
+	closeIdle := agent.ProviderCloseIdle(next)
 	if s.m != nil && s.m.pg != nil && len(profileIDs) > 0 && profileIDs[0] > 0 {
 		if p, _ := s.m.pg.ProfileByID(profileIDs[0]); p != nil {
 			next = llmrec.Wrap(next, s.m.pg, cfg.Model, p.Name, cfg.ThinkingType, cfg.ReasoningEffort, s.m.LLMRecordEnabled)
 			next = bindSideProvider(next, cfg, p.ID, p.Name)
 		}
 	}
-	return next, cfg, nil
+	return s.guardProxyProvider(t, next, cfg.Proxy, finalLLMProxyID(t, channelProxy, channelMode, channelProxyID, override), closeIdle), cfg, nil
 }
 
 // activeCfg resolves the task's currently-active LLM config, mirroring current()'s
@@ -773,7 +774,11 @@ func (s *Server) agentsForTask(t *Task, contexts ...context.Context) (*taskAgent
 	wk.SetRunTimeout(time.Duration(s.agentRunSeconds("worker")) * time.Second)
 	wk.SetProxy(proxyAddr, proxyCA)
 	wk.SetStrictProxy(true)
-	wk.SetWebSearch(s.webSearchFor("worker"))
+	workerSearch := s.webSearchFor("worker")
+	if t.proxyState().Mode == db.TaskProxyModeGroup {
+		workerSearch.Proxy = proxyAddr
+	}
+	wk.SetWebSearch(workerSearch)
 	wk.SetConstraintInject(s.constraintInjectWorker) // 操作约束注入 worker(可配置,默认开)
 	pl := agent.NewPlanner(plannerRuntime, "task-router", s.m.dir, tx, plannerRuntime.CompactionWindow(), s.agentMaxTurns("planner"))
 	pl.SetFindingRecorder(s.evidenceStore())
@@ -785,7 +790,11 @@ func (s *Server) agentsForTask(t *Task, contexts ...context.Context) (*taskAgent
 	pl.SetSteerWork(s.engine.SteerWork)
 	pl.SetProxy(proxyAddr, proxyCA)
 	pl.SetStrictProxy(true)
-	pl.SetWebSearch(s.webSearchFor("planner"))
+	plannerSearch := s.webSearchFor("planner")
+	if t.proxyState().Mode == db.TaskProxyModeGroup {
+		plannerSearch.Proxy = proxyAddr
+	}
+	pl.SetWebSearch(plannerSearch)
 	pl.SetConstraintInject(s.constraintInjectPlanner) // 操作约束注入 planner(可配置,默认开)
 	// cold-digest §7: 冷节点后台压缩。引擎经权威解析器实际驱动的就是这套 per-task planner
 	// (agentsForTask),Compactor 必须接在这里。走任务路由的 planner provider(§4:与 agent
@@ -799,7 +808,11 @@ func (s *Server) agentsForTask(t *Task, contexts ...context.Context) (*taskAgent
 	main.SetNoaEnabled(s.m.NoaCompactionEnabled) // 实验功能:noa 上下文压缩(平台级开关,每 run 读)
 	main.SetProxy(proxyAddr, proxyCA)
 	main.SetStrictProxy(true)
-	main.SetWebSearch(s.webSearchFor("mainagent"))
+	mainSearch := s.webSearchFor("mainagent")
+	if t.proxyState().Mode == db.TaskProxyModeGroup {
+		mainSearch.Proxy = proxyAddr
+	}
+	main.SetWebSearch(mainSearch)
 	main.SetSteerWork(s.engine.SteerWork) // steer_work：人对运行中 work 实时纠偏
 	bundle := &taskAgentBundle{
 		proxyAddr: proxyAddr, proxyCA: proxyCA, proxyRevision: proxyRevision,

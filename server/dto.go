@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/url"
@@ -72,24 +73,25 @@ type TaskDTO struct {
 }
 
 type ProxyDTO struct {
-	WarpPhase          string       `json:"warp_phase,omitempty"`
-	EgressIP           string       `json:"egress_ip,omitempty"`
-	Protocol           string       `json:"protocol"`
-	HasPassword        bool         `json:"has_password"`
-	HasResinAdminToken bool         `json:"has_resin_admin_token"`
-	ID                 int64        `json:"id"`
-	Name               string       `json:"name"`
-	Kind               db.ProxyKind `json:"kind"`
-	URL                string       `json:"url,omitempty"`
-	Host               string       `json:"host,omitempty"`
-	Port               int          `json:"port,omitempty"`
-	Username           string       `json:"username,omitempty"`
-	ResinPlatform      string       `json:"resin_platform,omitempty"`
-	ResinAdminURL      string       `json:"resin_admin_url,omitempty"`
-	Enabled            bool         `json:"enabled"`
-	Status             string       `json:"status"`
-	LastError          string       `json:"last_error,omitempty"`
-	LastCheckedAt      string       `json:"last_checked_at,omitempty"`
+	WarpHealth         *WarpHealthDTO `json:"warp_health,omitempty"`
+	WarpPhase          string         `json:"warp_phase,omitempty"`
+	EgressIP           string         `json:"egress_ip,omitempty"`
+	Protocol           string         `json:"protocol"`
+	HasPassword        bool           `json:"has_password"`
+	HasResinAdminToken bool           `json:"has_resin_admin_token"`
+	ID                 int64          `json:"id"`
+	Name               string         `json:"name"`
+	Kind               db.ProxyKind   `json:"kind"`
+	URL                string         `json:"url,omitempty"`
+	Host               string         `json:"host,omitempty"`
+	Port               int            `json:"port,omitempty"`
+	Username           string         `json:"username,omitempty"`
+	ResinPlatform      string         `json:"resin_platform,omitempty"`
+	ResinAdminURL      string         `json:"resin_admin_url,omitempty"`
+	Enabled            bool           `json:"enabled"`
+	Status             string         `json:"status"`
+	LastError          string         `json:"last_error,omitempty"`
+	LastCheckedAt      string         `json:"last_checked_at,omitempty"`
 }
 
 func proxyDTO(p *db.Proxy) *ProxyDTO {
@@ -117,6 +119,12 @@ func (s *Server) runtimeProxyDTO(p *db.Proxy) *ProxyDTO {
 		d.Status, d.WarpPhase = db.ProxyStatusFailed, "failed"
 		return d
 	}
+	if rt.health != nil {
+		if health, healthErr := rt.health.DTO(context.Background(), p.ID); healthErr == nil {
+			d.WarpHealth = health
+			d.EgressIP = health.EgressIP
+		}
+	}
 	profile, err := rt.warp.Get(warpProfileID(p.ID))
 	if err != nil {
 		if p.Status == db.ProxyStatusHealthy || p.Status == db.ProxyStatusFailed {
@@ -127,8 +135,8 @@ func (s *Server) runtimeProxyDTO(p *db.Proxy) *ProxyDTO {
 	d.WarpPhase = profile.Phase
 	switch profile.Phase {
 	case "ready":
-		if p.Enabled && p.Status == db.ProxyStatusHealthy && profile.Desired {
-			d.EgressIP = profile.EgressIP
+		if p.Enabled && p.Status == db.ProxyStatusHealthy && profile.Desired && d.WarpHealth != nil && d.WarpHealth.State == "ready" {
+			d.EgressIP = d.WarpHealth.EgressIP
 		} else {
 			d.Status = db.ProxyStatusFailed
 		}

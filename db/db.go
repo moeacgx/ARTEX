@@ -188,6 +188,18 @@ func Open(dsn string) (*DB, error) {
 		sqlDB.Close()
 		return nil, err
 	}
+	if err := d.EnsureProxyActivitySchema(); err != nil {
+		d.Close()
+		return nil, err
+	}
+	if err := d.MigrateProxyPolicies(); err != nil {
+		d.Close()
+		return nil, err
+	}
+	if err := d.MigrateWarpHealth(context.Background()); err != nil {
+		d.Close()
+		return nil, fmt.Errorf("migrate WARP health: %w", err)
+	}
 	return d, nil
 }
 

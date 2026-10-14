@@ -11,6 +11,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Autumn-27/artex/db"
@@ -158,6 +159,23 @@ func (s *Server) createWarpProxy(w http.ResponseWriter, r *http.Request, p *db.P
 
 	// 注册只属于首次创建者；数据库事务已提交，网络操作不占生命周期锁。
 	rt, err := s.m.proxyRuntime()
+	execution, executionErr := s.m.pg.TryWarpHealthExecution(r.Context(), created.ID)
+	if executionErr != nil {
+		writeJSON(w, 409, map[string]any{"error": "WARP 档案执行锁忙，请稍后查询原创建意图", "proxy_id": created.ID, "operation_status": "pending"})
+		return
+	}
+	claim, claimErr := s.m.pg.BeginWarpHealthCreate(r.Context(), execution, created.ID, s.m.warpHealthRepairGuard)
+	if claimErr != nil {
+		_ = execution.Close()
+		writeJSON(w, 409, map[string]any{"error": "WARP 健康屏障暂不可用，请查询原创建意图", "proxy_id": created.ID, "operation_status": "pending"})
+		return
+	}
+	marked := make(chan struct{})
+	var once sync.Once
+	stopMark := context.AfterFunc(r.Context(), func() {
+		markWarpActionUnknown(execution, claim)
+		once.Do(func() { close(marked) })
+	})
 	var connection *db.Proxy
 	if err == nil {
 		_, err = rt.warp.Create(r.Context(), warpProfileID(created.ID), created.Name, req.AcceptTerms)
@@ -174,10 +192,46 @@ func (s *Server) createWarpProxy(w http.ResponseWriter, r *http.Request, p *db.P
 	if err != nil {
 		failure = safeProxyRuntimeError(err)
 	}
-	completed, completeErr := s.m.pg.CompleteWarpProxyCreate(key, created.ID, intent.ExecutionToken, connection, failure)
+	materialProfile, material, materialErr := egress.WarpProfile{}, "", error(nil)
+	if err == nil {
+		materialProfile, material, materialErr = rt.warp.HealthMaterial(warpProfileID(created.ID))
+	}
+	stopped := stopMark()
+	if !stopped {
+		<-marked
+	}
+	if r.Context().Err() != nil || !stopped || errors.Is(err, egress.ErrWarpExitUnknown) {
+		if stopped {
+			markWarpActionUnknown(execution, claim)
+		}
+		_ = execution.Close()
+		writeJSON(w, 502, map[string]any{"error": "WARP 创建执行退出未确认；请查询原创建意图", "proxy_id": created.ID, "operation_status": "pending"})
+		return
+	}
+	if materialErr != nil {
+		failure = safeProxyRuntimeError(materialErr)
+		connection = nil
+		if err == nil {
+			err = materialErr
+		}
+	}
+	if err != nil || materialErr != nil {
+		materialProfile.Desired = false
+	}
+	completed, completeErr := s.m.pg.CompleteWarpHealthCreate(r.Context(), execution, claim, key, intent.ExecutionToken, connection, failure, db.WarpHealthIntent{Desired: materialProfile.Desired, Material: material, ProfileRevision: materialProfile.Revision})
+	if completeErr != nil {
+		markWarpActionUnknown(execution, claim)
+	}
+	_ = execution.Close()
 	if completeErr != nil {
 		writeJSON(w, 502, map[string]any{"error": "WARP 创建结果未能持久化；请核对原档案，不要重新注册", "proxy_id": created.ID, "proxy": proxyDTO(created), "operation_status": "pending"})
 		return
+	}
+	if runtime, runtimeErr := s.m.proxyRuntime(); runtimeErr == nil && runtime.health != nil {
+		_ = runtime.health.RunOnce(r.Context(), created.ID)
+		if fresh, readErr := s.m.pg.GetProxyContext(r.Context(), created.ID); readErr == nil {
+			completed = fresh
+		}
 	}
 	if err != nil {
 		writeJSON(w, 502, map[string]any{"error": "WARP 创建未成功；请核对原档案，不要重复注册", "proxy_id": completed.ID, "proxy": s.runtimeProxyDTO(completed), "operation_status": "failed"})
@@ -231,23 +285,21 @@ func (s *Server) deleteProxy(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "invalid proxy id")
 		return
 	}
-	if err := s.m.pg.DeleteProxyWithCleanup(id, func(p *db.Proxy) error {
-		if p.Kind != db.ProxyKindWarp {
-			return nil
+	p, err := s.m.pg.GetProxy(id)
+	if err != nil {
+		writeErr(w, 404, "代理不存在")
+		return
+	}
+	if p.Kind == db.ProxyKindWarp {
+		if err = s.deleteWarpProxy(r.Context(), id); err != nil {
+			if errors.Is(err, db.ErrProxyInUse) || errors.Is(err, db.ErrWarpHealthBlocked) {
+				writeErr(w, 409, "WARP 仍有活动或健康屏障未释放")
+			} else {
+				writeErr(w, 500, err.Error())
+			}
+			return
 		}
-		rt, err := s.m.proxyRuntime()
-		if err != nil {
-			return err
-		}
-		_, err = rt.warp.Get(warpProfileID(id))
-		if errors.Is(err, os.ErrNotExist) {
-			return nil
-		}
-		if err != nil {
-			return errors.New("WARP 档案不可读")
-		}
-		return rt.warp.Delete(r.Context(), warpProfileID(id))
-	}); err != nil {
+	} else if err = s.m.pg.DeleteProxy(id); err != nil {
 		if errors.Is(err, db.ErrProxyInUse) {
 			writeErr(w, 409, "代理正在被任务使用")
 		} else {
@@ -256,6 +308,39 @@ func (s *Server) deleteProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, map[string]any{"deleted": id})
+}
+
+// WARP 删除保持独立 session 执行锁直到运行器真实退出，网络清理在事务外执行。
+func (s *Server) deleteWarpProxy(ctx context.Context, id int64) error {
+	rt, err := s.m.proxyRuntime()
+	if err != nil {
+		return err
+	}
+	execution, err := s.m.pg.TryWarpHealthExecution(ctx, id)
+	if err != nil {
+		return err
+	}
+	defer execution.Close()
+	claim, err := s.m.pg.BeginWarpHealthDelete(ctx, execution, id, s.m.warpHealthRepairGuard)
+	if err != nil {
+		return err
+	}
+	_, getErr := rt.warp.Get(warpProfileID(id))
+	if getErr != nil && !errors.Is(getErr, os.ErrNotExist) {
+		markWarpActionUnknown(execution, claim)
+		return errors.New("WARP 档案不可读")
+	}
+	if getErr == nil {
+		if err = rt.warp.Delete(ctx, warpProfileID(id)); err != nil {
+			markWarpActionUnknown(execution, claim)
+			return err
+		}
+	}
+	if err = s.m.pg.CompleteWarpHealthDelete(ctx, execution, claim); err != nil {
+		markWarpActionUnknown(execution, claim)
+		return err
+	}
+	return nil
 }
 
 func (s *Server) testProxy(w http.ResponseWriter, r *http.Request) {
@@ -295,8 +380,10 @@ func (s *Server) testProxy(w http.ResponseWriter, r *http.Request) {
 	if p.Kind == db.ProxyKindWarp {
 		rt, runtimeErr := s.m.proxyRuntime()
 		probeErr = runtimeErr
-		if runtimeErr == nil {
-			_, probeErr = rt.warp.Probe(r.Context(), warpProfileID(id))
+		if runtimeErr == nil && rt.health != nil {
+			probeErr = rt.health.RunOnce(r.Context(), id)
+		} else if runtimeErr == nil {
+			probeErr = errors.New("WARP 健康控制器不可用")
 		}
 	} else if p.Kind == db.ProxyKindResin {
 		probeErr = newResinAdapter().probe(r.Context(), p)
@@ -309,16 +396,29 @@ func (s *Server) testProxy(w http.ResponseWriter, r *http.Request) {
 		status = db.ProxyStatusFailed
 		message = probeErr.Error()
 	}
-	now := time.Now()
-	p.Status, p.LastError, p.LastCheckedAt = status, message, &now
-	// Preserve secrets by using the store's update path with the existing values.
-	if err := s.m.pg.SetProxyStatus(id, status, message, now); err != nil {
-		if errors.Is(err, db.ErrProxyInUse) {
-			writeErr(w, 409, "WARP 创建状态已改变，请刷新后重试")
-		} else {
-			writeErr(w, 500, err.Error())
+	if p.Kind == db.ProxyKindWarp {
+		fresh, readErr := s.m.pg.GetProxyContext(r.Context(), id)
+		if readErr == nil {
+			p = fresh
 		}
-		return
+		if probeErr == nil {
+			health, healthErr := s.m.pg.WarpHealth(r.Context(), id)
+			if healthErr != nil || health.State != "ready" || !health.Desired {
+				probeErr = db.ErrWarpHealthBlocked
+				message = "WARP 尚未通过健康验证"
+			}
+		}
+	} else {
+		now := time.Now()
+		p.Status, p.LastError, p.LastCheckedAt = status, message, &now
+		if err := s.m.pg.SetProxyStatus(id, status, message, now); err != nil {
+			if errors.Is(err, db.ErrProxyInUse) {
+				writeErr(w, 409, "代理状态已改变，请刷新后重试")
+			} else {
+				writeErr(w, 500, err.Error())
+			}
+			return
+		}
 	}
 	if probeErr != nil {
 		writeErr(w, 502, message)
@@ -372,5 +472,8 @@ func (s *Server) RegisterProxyActionRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/proxies/batch", s.batchCreateProxies)
 	mux.HandleFunc("GET /api/proxies/{id}", s.getProxy)
 	mux.HandleFunc("POST /api/proxies/{id}/warp/{action}", s.warpAction)
+	mux.HandleFunc("GET /api/proxies/{id}/health-policy", s.warpHealthPolicy)
+	mux.HandleFunc("PUT /api/proxies/{id}/health-policy", s.warpHealthPolicy)
+	mux.HandleFunc("POST /api/proxies/{id}/health/recovery", s.warpHealthRecovery)
 	mux.HandleFunc("POST /api/proxies/{id}/resin/release", s.releaseResin)
 }

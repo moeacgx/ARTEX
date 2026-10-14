@@ -10,6 +10,8 @@ import (
 	"errors"
 	"sync"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 type taskOperationLeaseKey struct {
@@ -217,12 +219,43 @@ func (x *TaskProxySwitchExecutor) AbortToDirect(expected int64, token string) (T
 func (x *TaskProxySwitchExecutor) AcquireIdleTaskProxyActivity() error {
 	return x.d.withProxySwitchLifecycle(x.conn, func(tx *sql.Tx) error { return acquireTaskProxyActivityTx(tx, x.id, true) })
 }
+func (x *TaskProxySwitchExecutor) AcquireIdleTaskProxyActivityRevision(expected int64) error {
+	return x.d.withProxySwitchLifecycle(x.conn, func(tx *sql.Tx) error {
+		state, e := taskProxyStateTx(tx, x.id)
+		if e != nil {
+			return e
+		}
+		if state.Revision != expected {
+			return ErrProxyRevisionConflict
+		}
+		if state.Mode == TaskProxyModeGroup {
+			// 清理只关闭旧本地资源，撤权不能阻止清理；仍持独占会话锁与持久占用。
+			policy, err := proxyPolicyTx(tx, ProxySubject{Kind: "task", ID: x.id})
+			if err != nil {
+				return err
+			}
+			if err = proxyPolicyBarrierTx(tx, policy); err != nil {
+				return err
+			}
+			if err = policyActivitiesIdleTx(tx, policy); err != nil {
+				return err
+			}
+			if state.ID == nil || *state.ID <= 0 {
+				return ErrProxyUnavailable
+			}
+			_, err = tx.Exec(`INSERT INTO task_proxy_activity(task_id,proxy_id,active_count,exclusive_release) VALUES($1,$2,1,true)`, x.id, *state.ID)
+			return err
+		}
+		return acquireTaskProxyActivityTx(tx, x.id, true)
+	})
+}
 func (x *TaskProxySwitchExecutor) ReleaseTaskProxyActivity() error {
 	return x.d.withProxySwitchLifecycle(x.conn, func(tx *sql.Tx) error { return releaseTaskProxyActivityTx(tx, x.id) })
 }
 
 var ErrProxyRevisionConflict = errors.New("任务代理版本已变化")
 var ErrProxySwitchRecovery = errors.New("任务代理切换需人工恢复")
+var ErrProxyActivityToken = errors.New("原操作活动 token 不存在")
 
 // 持久屏障独立于代理引用，直连任务也必须保护真实在途操作。
 func (d *DB) MigrateTaskProxySwitch() error {
@@ -242,10 +275,11 @@ ALTER TABLE task_operation_activity ADD COLUMN IF NOT EXISTS operation_owners js
 }
 
 type TaskProxyState struct {
-	Mode     TaskProxyMode
-	ID       *int64
-	Snapshot ProxySnapshot
-	Revision int64
+	Mode           TaskProxyMode
+	ID             *int64
+	Snapshot       ProxySnapshot
+	Revision       int64
+	OperationToken string `json:"-"`
 }
 
 func taskProxyStateTx(tx *sql.Tx, id int64) (TaskProxyState, error) {
@@ -268,6 +302,19 @@ func (d *DB) AcquireTaskOperation(id int64) (TaskProxyState, error) {
 	lease.txMu.Lock()
 	err = d.withProxySwitchLifecycle(lease.conn, func(tx *sql.Tx) error {
 		var err error
+		policy, err := proxyPolicyTx(tx, ProxySubject{Kind: "task", ID: id})
+		if err != nil {
+			return err
+		}
+		if err = proxyPolicyBarrierTx(tx, policy); err != nil {
+			return err
+		}
+		if err = validateProxyPolicyTx(tx, policy); err != nil {
+			return err
+		}
+		if err = checkProxyActivityOwnersTx(tx, policy); err != nil {
+			return err
+		}
 		s, err = taskProxyStateTx(tx, id)
 		if err != nil {
 			return err
@@ -297,6 +344,16 @@ AND l.classid=(($2::bigint >> 32) & 4294967295)::oid AND l.objid=($2::bigint & 4
 		}
 		_, err = tx.Exec(`INSERT INTO task_operation_activity(task_id,active_count,operation_owners) VALUES($1,1,jsonb_build_object(pg_backend_pid()::text,1)) ON CONFLICT(task_id) DO UPDATE SET active_count=task_operation_activity.active_count+1,
 operation_owners=jsonb_set(task_operation_activity.operation_owners,ARRAY[pg_backend_pid()::text],to_jsonb(COALESCE((task_operation_activity.operation_owners->>pg_backend_pid()::text)::bigint,0)+1))`, id)
+		if err != nil {
+			return err
+		}
+		s.OperationToken = uuid.NewString()
+		if s.ID != nil {
+			if err = AcquireWarpHealthActivityTx(context.Background(), tx, *s.ID, s.OperationToken); err != nil {
+				return err
+			}
+		}
+		_, err = tx.Exec(`INSERT INTO proxy_subject_activity(token,policy_id,revision,proxy_id,backend_pid,kind) VALUES($1,$2,$3,$4,pg_backend_pid(),'task')`, s.OperationToken, policy.ID, s.Revision, s.ID)
 		return err
 	})
 	lease.txMu.Unlock()
@@ -307,6 +364,10 @@ operation_owners=jsonb_set(task_operation_activity.operation_owners,ARRAY[pg_bac
 }
 
 func (d *DB) ReleaseTaskOperation(id int64) error {
+	return d.ReleaseTaskOperationToken(id, "")
+}
+
+func (d *DB) ReleaseTaskOperationToken(id int64, token string) error {
 	k := taskOperationLeaseKey{database: d.DB, taskID: id}
 	taskOperationLeases.Lock()
 	lease := taskOperationLeases.leases[k]
@@ -315,7 +376,22 @@ func (d *DB) ReleaseTaskOperation(id int64) error {
 		return ErrProxySwitchRecovery
 	}
 	lease.txMu.Lock()
+	missingToken := false
 	err := d.withProxySwitchLifecycle(lease.conn, func(tx *sql.Tx) error {
+		if token == "" {
+			if err := tx.QueryRow(`SELECT a.token FROM proxy_subject_activity a JOIN proxy_subject_policies p ON p.id=a.policy_id WHERE p.task_id=$1 AND a.backend_pid=pg_backend_pid() AND a.kind='task' ORDER BY a.created_at,a.token LIMIT 1`, id).Scan(&token); err != nil {
+				missingToken = errors.Is(err, sql.ErrNoRows)
+				return ErrProxySwitchRecovery
+			}
+		}
+		var matches bool
+		if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM proxy_subject_activity a JOIN proxy_subject_policies p ON p.id=a.policy_id WHERE a.token=$1 AND p.task_id=$2 AND a.backend_pid=pg_backend_pid() AND a.kind='task')`, token, id).Scan(&matches); err != nil {
+			return err
+		}
+		if !matches {
+			missingToken = true
+			return ErrProxySwitchRecovery
+		}
 		var owned int64
 		if err := tx.QueryRow(`SELECT COALESCE((operation_owners->>pg_backend_pid()::text)::bigint,0) FROM task_operation_activity WHERE task_id=$1`, id).Scan(&owned); err != nil {
 			return err
@@ -328,9 +404,20 @@ func (d *DB) ReleaseTaskOperation(id int64) error {
 		}
 		_, err := tx.Exec(`UPDATE task_operation_activity SET active_count=active_count-1,
 operation_owners=CASE WHEN $2=1 THEN operation_owners-pg_backend_pid()::text ELSE jsonb_set(operation_owners,ARRAY[pg_backend_pid()::text],to_jsonb($2::bigint-1)) END WHERE task_id=$1 AND active_count>0`, id, owned)
+		if err != nil {
+			return err
+		}
+		_, err = tx.Exec(`DELETE FROM proxy_subject_activity WHERE token=$1`, token)
+		if err != nil {
+			return err
+		}
+		err = ReleaseWarpHealthActivityTx(context.Background(), tx, token)
 		return err
 	})
 	lease.txMu.Unlock()
+	if missingToken {
+		return errors.Join(err, ErrProxyActivityToken)
+	}
 	if err != nil {
 		// 数据计数失败时保留持久占用，但释放会话锁；这样人工独占恢复可
 		// 在确认没有真实操作后清理残留，而不是被已结束的操作永久锁住。
@@ -342,6 +429,9 @@ operation_owners=CASE WHEN $2=1 THEN operation_owners-pg_backend_pid()::text ELS
 func (x *TaskProxySwitchExecutor) ClearStaleTaskOperations() error {
 	return x.d.withProxySwitchLifecycle(x.conn, func(tx *sql.Tx) error {
 		if _, err := tx.Exec(`DELETE FROM task_proxy_activity WHERE task_id=$1`, x.id); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`DELETE FROM proxy_subject_activity WHERE policy_id=(SELECT id FROM proxy_subject_policies WHERE task_id=$1)`, x.id); err != nil {
 			return err
 		}
 		_, err := tx.Exec(`UPDATE task_operation_activity SET active_count=0,operation_owners='{}'::jsonb WHERE task_id=$1 AND switch_token=''`, x.id)
@@ -396,6 +486,9 @@ EXISTS(SELECT 1 FROM task_operation_activity WHERE task_id=$1 AND active_count=0
 		if err != nil {
 			return err
 		}
+		if normalized == TaskProxyModeGroup || old.Mode == TaskProxyModeGroup {
+			return ErrProxyAuthorization
+		}
 		if normalized != TaskProxyModeFixed && selected != nil {
 			return ErrProxyInvalidMode
 		}
@@ -441,6 +534,13 @@ EXISTS(SELECT 1 FROM task_operation_activity WHERE task_id=$1 AND active_count=0
 // 生命周期准入不能在锁外把已封锁任务重新置为 running/queued。
 func (d *DB) WithTaskProxyMutation(id int64, fn func(*sql.Tx) error) error {
 	return d.withProxyLifecycle(func(tx *sql.Tx) error {
+		policy, err := proxyPolicyTx(tx, ProxySubject{Kind: "task", ID: id})
+		if err != nil {
+			return err
+		}
+		if err = proxyPolicyBarrierTx(tx, policy); err != nil {
+			return err
+		}
 		var switching bool
 		if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM task_operation_activity WHERE task_id=$1 AND switch_token<>'')`, id).Scan(&switching); err != nil {
 			return err
@@ -511,6 +611,9 @@ func (d *DB) abortTaskProxySwitchToDirect(conn *sql.Conn, id, expected int64, to
 		}
 		if old.Revision != expected {
 			return ErrProxyRevisionConflict
+		}
+		if old.Mode == TaskProxyModeGroup {
+			return ErrProxyAuthorization
 		}
 		var pending string
 		var owners []byte

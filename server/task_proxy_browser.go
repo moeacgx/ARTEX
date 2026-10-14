@@ -22,17 +22,32 @@ func (m *Manager) TaskMCPConfig(ctx context.Context, original *db.MCPServer) (*d
 		return original, nil
 	}
 	id := agent.RunInfoFrom(ctx).TaskID
-	if id <= 0 {
+	formal, hasFormal := ctx.Value(proxySubjectContextKey{}).(admittedProxySubject)
+	if id <= 0 && (!hasFormal || formal.Subject.Kind != "conversation") {
 		return original, nil
 	}
 	if original.Transport != "stdio" {
 		return nil, errors.New("任务浏览器要求独立 stdio 运行时")
 	}
-	row, err := m.pg.GetTask(id)
-	if err != nil {
-		return nil, err
+	var task *Task
+	if hasFormal {
+		p, err := m.pg.GetProxyPolicy(formal.Subject)
+		if err != nil {
+			return nil, err
+		}
+		task = proxySubjectRuntimeTask(p)
+		id = formal.Subject.ID
+		if formal.Subject.Kind == "conversation" {
+			id = -id
+		}
+	} else {
+		row, err := m.pg.GetTask(id)
+		if err != nil {
+			return nil, err
+		}
+		task = &Task{ID: strconv.FormatInt(id, 10), ProxyMode: row.ProxyMode, ProxyID: row.ProxyID, ProxySnapshot: row.ProxySnapshot}
 	}
-	addr, ca, err := m.TaskToolProxy(ctx, &Task{ID: strconv.FormatInt(id, 10), ProxyMode: row.ProxyMode, ProxyID: row.ProxyID, ProxySnapshot: row.ProxySnapshot})
+	addr, ca, err := m.TaskToolProxy(ctx, task)
 	if err != nil {
 		return nil, err
 	}
@@ -47,11 +62,11 @@ func (m *Manager) TaskMCPConfig(ctx context.Context, original *db.MCPServer) (*d
 				return nil, err
 			}
 			rt.mu.Lock()
-			bridge := rt.bridges[strconv.FormatInt(id, 10)]
+			bridge := rt.bridges[task.ID]
 			if bridge == nil {
 				bridge, err = egress.NewHTTPBridge(addr)
 				if err == nil {
-					rt.bridges[strconv.FormatInt(id, 10)] = bridge
+					rt.bridges[task.ID] = bridge
 				}
 			}
 			rt.mu.Unlock()

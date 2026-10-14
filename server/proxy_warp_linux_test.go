@@ -68,7 +68,7 @@ func TestWarpToolProcess(t *testing.T) {
 				fmt.Fprintln(os.Stderr, "synthetic-private-token")
 				os.Exit(42)
 			}
-			if err := os.WriteFile(args[1], []byte("synthetic-account"), 0600); err != nil {
+			if err := os.WriteFile(args[1], []byte("private_key = synthetic\naccess_token = synthetic\ndevice_id = synthetic\n"), 0600); err != nil {
 				os.Exit(92)
 			}
 		} else if len(args) == 5 && args[2] == "generate" && args[3] == "--profile" {
@@ -190,7 +190,7 @@ func TestWarpToolProcess(t *testing.T) {
 			if mode == "probe-fail" || failProbe == nil {
 				warp = "off"
 			}
-			body := "ip=198.51.100.42\nwarp=" + warp + "\n"
+			body := "ip=8.8.8.8\nwarp=" + warp + "\n"
 			fmt.Fprintf(secured, "HTTP/1.1 200 OK\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s", len(body), body)
 		}()
 	}
@@ -293,7 +293,7 @@ func TestProxyPGWarpOneClick(t *testing.T) {
 					}
 				}
 			} else {
-				if row["status"] != "healthy" || row["warp_phase"] != "ready" || row["egress_ip"] != "198.51.100.42" {
+				if row["status"] != "healthy" || row["warp_phase"] != "ready" || row["egress_ip"] != "8.8.8.8" {
 					t.Fatalf("未返回真实探测IP: %s", raw)
 				}
 				for _, action := range []string{"register", "recover"} {
@@ -369,11 +369,11 @@ func TestProxyPGWarpOneClick(t *testing.T) {
 			}
 			if mode == "ready" {
 				c, got, r := proxyAPI(t, mux, "POST", path+"/warp/start", "")
-				if c != 200 || got["egress_ip"] != "198.51.100.42" {
+				if c != 200 || got["egress_ip"] != "8.8.8.8" {
 					t.Fatalf("同ID启动未返回出口: %d %s", c, r)
 				}
 				c, got, r = proxyAPI(t, mux, "POST", path+"/test", "")
-				if c != 200 || got["egress_ip"] != "198.51.100.42" {
+				if c != 200 || got["egress_ip"] != "8.8.8.8" {
 					t.Fatalf("出口重新探测失败: %d %s", c, r)
 				}
 				if err := os.WriteFile(filepath.Join(os.Getenv("ARTEX_WARP_DIR"), warpProfileID(int64(id)), "synthetic-exit"), []byte("exit"), 0600); err != nil {
@@ -432,7 +432,7 @@ func TestProxyPGWarpRuntimeRecovery(t *testing.T) {
 					t.Fatal(err)
 				}
 				code, out, raw = proxyAPI(t, mux, "POST", path+"/test", "")
-				if code != 200 || out["status"] != "healthy" || out["egress_ip"] != "198.51.100.42" {
+				if code != 200 || out["status"] != "healthy" || out["egress_ip"] != "8.8.8.8" {
 					t.Fatalf("存活出口不能原地复探恢复: %d %s", code, raw)
 				}
 				code, _, raw = proxyAPI(t, mux, "POST", path+"/warp/stop", "")
@@ -442,7 +442,7 @@ func TestProxyPGWarpRuntimeRecovery(t *testing.T) {
 			} else if scenario == "repeat-start" {
 				for i := 0; i < 2; i++ {
 					code, out, raw = proxyAPI(t, mux, "POST", path+"/warp/start", "")
-					if code != 200 || out["status"] != "healthy" || out["egress_ip"] != "198.51.100.42" {
+					if code != 200 || out["status"] != "healthy" || out["egress_ip"] != "8.8.8.8" {
 						t.Fatalf("重复start毒化健康出口: %d %s", code, raw)
 					}
 				}
@@ -452,7 +452,7 @@ func TestProxyPGWarpRuntimeRecovery(t *testing.T) {
 					t.Fatalf("未接受条款操作应被拒绝: %d %s", code, raw)
 				}
 				code, out, raw = proxyAPI(t, mux, "GET", path, "")
-				if code != 200 || out["status"] != "healthy" || out["egress_ip"] != "198.51.100.42" {
+				if code != 200 || out["status"] != "healthy" || out["egress_ip"] != "8.8.8.8" {
 					t.Fatalf("被拒绝的操作毒化实际健康状态: %d %s", code, raw)
 				}
 			}
@@ -532,7 +532,7 @@ func TestProxyPGWarpActionSingleConnection(t *testing.T) {
 			if err := json.Unmarshal(data, &dto); err != nil {
 				t.Fatal(err)
 			}
-			if dto.ID != id || (action == "stop" && (dto.Status != "stopped" || dto.EgressIP != "")) || (action == "start" && (dto.Status != "healthy" || dto.EgressIP != "198.51.100.42")) {
+			if dto.ID != id || (action == "stop" && (dto.Status != "stopped" || dto.EgressIP != "")) || (action == "start" && (dto.Status != "healthy" || dto.EgressIP != "8.8.8.8")) {
 				t.Fatalf("操作DTO状态错误: %s", data)
 			}
 			if s.m.pg.Stats().WaitCount != before {
@@ -597,7 +597,7 @@ func TestProxyPGWarpChannelDeletePreservesProfile(t *testing.T) {
 	}
 	for _, action := range []string{"start", "recover"} {
 		code, out, raw = proxyAPI(t, mux, "POST", path+"/warp/"+action, "")
-		if code != 200 || out["id"] != float64(id) || out["egress_ip"] != "198.51.100.42" {
+		if code != 200 || out["id"] != float64(id) || out["egress_ip"] != "8.8.8.8" {
 			t.Fatalf("解绑后原ID不能恢复: %s %d %s", action, code, raw)
 		}
 	}
