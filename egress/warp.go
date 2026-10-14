@@ -1,7 +1,6 @@
 package egress
 
 import (
-	"bufio"
 	"context"
 	"crypto/rand"
 	"encoding/base64"
@@ -10,8 +9,6 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"net/http"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -24,6 +21,7 @@ import (
 var warpIDPattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]{0,47}$`)
 
 type WarpProfile struct {
+	Revision              uint64 `json:"revision"`
 	ID                    string `json:"id"`
 	Name                  string `json:"name"`
 	Phase                 string `json:"phase"`
@@ -54,11 +52,19 @@ type warpProcess struct {
 }
 
 type WarpManager struct {
-	dir       string
-	mu        sync.Mutex
-	processes map[string]*warpProcess
-	run       func(context.Context, string, []string, string) error
-	probe     func(context.Context, WarpConnection) (string, error)
+	dir        string
+	mu         sync.Mutex
+	processes  map[string]*warpProcess
+	locks      map[string]*sync.Mutex
+	probing    map[string]bool
+	closed     bool
+	operations sync.WaitGroup
+	watchers   sync.WaitGroup
+	ctx        context.Context
+	cancel     context.CancelFunc
+	command    func(string) *exec.Cmd
+	run        func(context.Context, string, []string, string) error
+	probe      func(context.Context, WarpConnection) (string, error)
 }
 
 func NewWarpManager(dir string) (*WarpManager, error) {
@@ -71,7 +77,10 @@ func NewWarpManager(dir string) (*WarpManager, error) {
 	if err := os.Chmod(dir, 0700); err != nil {
 		return nil, err
 	}
-	return &WarpManager{dir: dir, processes: make(map[string]*warpProcess), run: runWarpCommand, probe: probeWarpEgress}, nil
+	ctx, cancel := context.WithCancel(context.Background())
+	return &WarpManager{dir: dir, processes: make(map[string]*warpProcess), locks: make(map[string]*sync.Mutex), probing: make(map[string]bool), ctx: ctx, cancel: cancel, run: runWarpCommand, probe: probeWarpEgress, command: func(path string) *exec.Cmd {
+		return exec.Command("wireproxy", "-c", filepath.Join(path, "wireproxy.conf"))
+	}}, nil
 }
 
 func runWarpCommand(ctx context.Context, exe string, args []string, dir string) error {
@@ -128,12 +137,15 @@ func readProfile(path string) (WarpProfile, error) {
 }
 
 func (m *WarpManager) save(path string, p WarpProfile) error {
+	if old, err := readProfile(path); err == nil {
+		p.Revision = old.Revision + 1
+	} else {
+		p.Revision++
+	}
 	return privateWrite(filepath.Join(path, "meta.json"), p)
 }
 
 func (m *WarpManager) Get(id string) (WarpProfile, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
 	path, err := m.path(id)
 	if err != nil {
 		return WarpProfile{}, err
@@ -148,14 +160,14 @@ func (m *WarpManager) liveProfileLocked(p WarpProfile) WarpProfile {
 		p.EgressIP = ""
 		return p
 	}
-	if !m.runningLocked(p.ID) || !p.Desired || net.ParseIP(p.EgressIP) == nil {
+	if !m.runningLocked(p.ID) || !p.Desired || !ValidWarpPublicIP(p.EgressIP) {
 		p.Phase, p.EgressIP, p.LastError = "failed", "", "WARP 运行器未在线或出口未验证"
 	}
 	return p
 }
 
 func (m *WarpManager) runningLocked(id string) bool {
-	proc := m.processes[id]
+	proc := m.process(id)
 	if proc == nil {
 		return false
 	}
@@ -168,8 +180,6 @@ func (m *WarpManager) runningLocked(id string) bool {
 }
 
 func (m *WarpManager) List() ([]WarpProfile, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
 	entries, err := os.ReadDir(m.dir)
 	if err != nil {
 		return nil, err
@@ -225,8 +235,13 @@ func (m *WarpManager) allocatePort() (int, error) {
 
 // Create 在执行任何外部注册命令前持久化注册意图。重复请求只返回原档案，绝不重新注册。
 func (m *WarpManager) Create(ctx context.Context, id, name string, acceptTerms bool) (WarpProfile, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	unlock, err := m.beginProfile(id)
+	if err != nil {
+		return WarpProfile{}, err
+	}
+	defer unlock()
+	ctx, cancel := m.operationContext(ctx)
+	defer cancel()
 	path, err := m.path(id)
 	if err != nil {
 		return WarpProfile{}, err
@@ -275,6 +290,7 @@ func (m *WarpManager) Create(ctx context.Context, id, name string, acceptTerms b
 func (m *WarpManager) finish(ctx context.Context, path string, p WarpProfile) (WarpProfile, error) {
 	fail := func(message string, e error) (WarpProfile, error) {
 		p.Phase = "failed"
+		p.EgressIP = ""
 		p.LastError = message
 		_ = m.save(path, p)
 		return p, e
@@ -353,8 +369,6 @@ func readAuth(path string, auth *warpAuth) error {
 }
 
 func (m *WarpManager) Connection(id string) (WarpConnection, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
 	path, err := m.path(id)
 	if err != nil {
 		return WarpConnection{}, err
@@ -377,11 +391,17 @@ func (m *WarpManager) Connection(id string) (WarpConnection, error) {
 }
 
 func (m *WarpManager) startLocked(ctx context.Context, path string, p WarpProfile) (WarpProfile, error) {
-	if running := m.processes[p.ID]; running != nil {
+	if err := ctx.Err(); err != nil {
+		return p, err
+	}
+	if running := m.process(p.ID); running != nil {
 		if current := m.liveProfileLocked(p); current.Phase == "ready" {
 			return current, nil
 		}
 		return p, errors.New("WARP 出口已有运行进程")
+	}
+	if err := m.confirmPriorProcess(path); err != nil {
+		return p, err
 	}
 	p.Desired = true
 	p.Phase = "starting"
@@ -390,56 +410,57 @@ func (m *WarpManager) startLocked(ctx context.Context, path string, p WarpProfil
 	if err := m.save(path, p); err != nil {
 		return p, err
 	}
-	cmd := exec.Command("wireproxy", "-c", filepath.Join(path, "wireproxy.conf"))
+	var auth warpAuth
+	if err := readAuth(path, &auth); err != nil {
+		p.Phase, p.LastError = "failed", "WARP 认证材料无效"
+		_ = m.save(path, p)
+		return p, errors.New(p.LastError)
+	}
+	// 记录本次启动版本；锁外等待期间明确管理意图可以使其失效。
+	p, err := readProfile(path)
+	if err != nil {
+		return p, err
+	}
+	cmd := m.command(path)
 	cmd.Dir = path
 	cmd.Stdout = io.Discard
 	cmd.Stderr = io.Discard
+	if err := writeWarpProcessRecord(path, 0, false); err != nil {
+		return p, err
+	}
 	if err := cmd.Start(); err != nil {
+		_ = writeWarpProcessRecord(path, 0, true)
 		p.Phase = "failed"
 		p.LastError = "wireproxy 启动失败"
 		_ = m.save(path, p)
 		return p, errors.New(p.LastError)
 	}
 	proc := &warpProcess{cmd: cmd, done: make(chan struct{})}
+	m.mu.Lock()
 	m.processes[p.ID] = proc
+	m.mu.Unlock()
+	m.watchers.Add(1)
 	go m.watch(path, p.ID, proc)
-	deadline := time.NewTimer(10 * time.Second)
-	defer deadline.Stop()
-	for {
-		conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", p.Port), 150*time.Millisecond)
-		if err == nil {
-			conn.Close()
-			break
-		}
-		select {
-		case <-ctx.Done():
-			m.stopProcessLocked(p.ID)
-			p.Phase = "failed"
-			p.LastError = "WARP 启动取消"
-			_ = m.save(path, p)
-			return p, ctx.Err()
-		case <-proc.done:
-			p.Phase = "failed"
-			p.LastError = "wireproxy 启动后退出"
-			_ = m.save(path, p)
-			return p, errors.New(p.LastError)
-		case <-deadline.C:
-			m.stopProcessLocked(p.ID)
-			p.Phase = "failed"
-			p.LastError = "WARP 本地监听超时"
-			_ = m.save(path, p)
-			return p, errors.New(p.LastError)
-		case <-time.After(100 * time.Millisecond):
-		}
+	if err := writeWarpProcessRecord(path, cmd.Process.Pid, false); err != nil {
+		_ = m.stopProcessLocked(p.ID)
+		return p, ErrWarpExitUnknown
 	}
-	var auth warpAuth
-	if err := readAuth(path, &auth); err != nil {
-		m.stopProcessLocked(p.ID)
-		return p, err
-	}
-	ip, err := m.probe(ctx, WarpConnection{"127.0.0.1", p.Port, auth.Username, auth.Password})
+	lock := m.profileLock(p.ID)
+	lock.Unlock()
+	ip, probeErr := m.waitStartedProbe(ctx, p, proc, auth)
+	lock.Lock()
+	current, err := readProfile(path)
 	if err != nil {
-		m.stopProcessLocked(p.ID)
+		return current, err
+	}
+	if current.Revision != p.Revision || !current.Desired || m.process(p.ID) != proc {
+		return m.liveProfileLocked(current), ErrWarpStaleProbe
+	}
+	p = current
+	if probeErr != nil || ctx.Err() != nil || !ValidWarpPublicIP(ip) || !m.runningLocked(p.ID) {
+		if stopErr := m.stopProcessLocked(p.ID); stopErr != nil {
+			return p, stopErr
+		}
 		p.Phase = "failed"
 		p.LastError = "WARP 联网检测失败"
 		_ = m.save(path, p)
@@ -450,50 +471,74 @@ func (m *WarpManager) startLocked(ctx context.Context, path string, p WarpProfil
 	if err := m.save(path, p); err != nil {
 		return p, err
 	}
-	return p, nil
+	return readProfile(path)
 }
 
 func (m *WarpManager) watch(path, id string, proc *warpProcess) {
+	defer m.watchers.Done()
 	_ = proc.cmd.Wait()
 	close(proc.done)
+	lock := m.profileLock(id)
+	lock.Lock()
+	defer lock.Unlock()
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	if m.processes[id] != proc {
+		m.mu.Unlock()
 		return
 	}
 	delete(m.processes, id)
-	if proc.stopping {
+	stopping := proc.stopping
+	m.mu.Unlock()
+	_ = writeWarpProcessRecord(path, proc.cmd.Process.Pid, true)
+	if stopping {
 		return
 	}
 	p, err := readProfile(path)
 	if err != nil {
 		return
 	}
-	p.Phase = "failed"
-	p.EgressIP = ""
-	p.LastError = "wireproxy 进程已退出"
+	p.Phase, p.EgressIP, p.LastError = "failed", "", "wireproxy 进程已退出"
 	_ = m.save(path, p)
 }
 
-func (m *WarpManager) stopProcessLocked(id string) {
+// 超时仅表示退出未确认，保留进程记录，禁止另起重叠运行器。
+func (m *WarpManager) stopProcessLocked(id string) error {
+	m.mu.Lock()
 	proc := m.processes[id]
 	if proc == nil {
-		return
+		m.mu.Unlock()
+		return nil
 	}
 	proc.stopping = true
-	if proc.cmd.Process != nil {
+	m.mu.Unlock()
+	if proc.cmd != nil && proc.cmd.Process != nil {
 		_ = proc.cmd.Process.Kill()
 	}
 	select {
 	case <-proc.done:
+		m.mu.Lock()
+		if m.processes[id] == proc {
+			delete(m.processes, id)
+		}
+		m.mu.Unlock()
+		if proc.cmd != nil && proc.cmd.Process != nil {
+			path, _ := m.path(id)
+			_ = writeWarpProcessRecord(path, proc.cmd.Process.Pid, true)
+		}
+		return nil
 	case <-time.After(3 * time.Second):
+		return ErrWarpExitUnknown
 	}
-	delete(m.processes, id)
 }
 
 func (m *WarpManager) Start(ctx context.Context, id string) (WarpProfile, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	unlock, err := m.beginProfile(id)
+	if err != nil {
+		return WarpProfile{}, err
+	}
+	defer unlock()
+	ctx, cancel := m.operationContext(ctx)
+	defer cancel()
 	path, err := m.path(id)
 	if err != nil {
 		return WarpProfile{}, err
@@ -510,44 +555,82 @@ func (m *WarpManager) Start(ctx context.Context, id string) (WarpProfile, error)
 
 // Probe 刷新当前出口 IP；停止、崩溃或失败的运行器不会仅凭旧地址恢复为 healthy。
 func (m *WarpManager) Probe(ctx context.Context, id string) (WarpProfile, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	unlock, err := m.beginProfile(id)
+	if err != nil {
+		return WarpProfile{}, err
+	}
+	ctx, cancel := m.operationContext(ctx)
+	defer cancel()
 	path, err := m.path(id)
 	if err != nil {
+		unlock()
 		return WarpProfile{}, err
 	}
 	p, err := readProfile(path)
 	if err != nil {
+		unlock()
 		return p, err
 	}
 	p = m.liveProfileLocked(p)
-	// 失败的探测不销毁仍在服务任务的进程；材料与进程有效即可原地复探。
+	m.mu.Lock()
+	busy := m.probing[id]
+	if !busy {
+		m.probing[id] = true
+	}
+	m.mu.Unlock()
+	if busy {
+		unlock()
+		return p, errors.New("WARP 正在探测")
+	}
+	defer func() { m.mu.Lock(); delete(m.probing, id); m.mu.Unlock() }()
+	proc := m.process(id)
 	if (p.Phase != "ready" && p.Phase != "failed") || !p.Desired || !p.Registered || !p.Generated || !m.runningLocked(id) {
+		unlock()
 		return p, errors.New("WARP 出口尚未就绪")
 	}
 	var auth warpAuth
-	if err := readAuth(path, &auth); err != nil {
+	if err = readAuth(path, &auth); err != nil {
+		unlock()
 		return p, err
 	}
-	ip, err := m.probe(ctx, WarpConnection{"127.0.0.1", p.Port, auth.Username, auth.Password})
+	// 探测不改变进程，释放档案锁使 stop 可先递增 revision。
+	// operations 继续覆盖真实网络退出，释放锁不代表执行结束。
+	m.operations.Add(1)
+	unlock()
+	defer m.operations.Done()
+	ip, probeErr := m.probe(ctx, WarpConnection{"127.0.0.1", p.Port, auth.Username, auth.Password})
+	lock := m.profileLock(id)
+	lock.Lock()
+	defer lock.Unlock()
+	current, err := readProfile(path)
 	if err != nil {
-		p.Phase, p.EgressIP, p.LastError = "failed", "", "WARP 联网检测失败"
-		// 健康探测不拥有生命周期准入权；停止仍须走管理端引用屏障。
+		return current, err
+	}
+	if current.Revision != p.Revision || m.process(id) != proc || !current.Desired {
+		return m.liveProfileLocked(current), ErrWarpStaleProbe
+	}
+	if probeErr != nil || ctx.Err() != nil || !ValidWarpPublicIP(ip) || !m.runningLocked(id) {
+		current.Phase, current.EgressIP, current.LastError = "failed", "", "WARP 联网检测失败"
 	} else {
-		p.Phase, p.EgressIP, p.LastError = "ready", ip, ""
+		current.Phase, current.EgressIP, current.LastError = "ready", ip, ""
 	}
-	if saveErr := m.save(path, p); saveErr != nil {
-		return p, saveErr
+	if err = m.save(path, current); err != nil {
+		return current, err
 	}
-	if err != nil {
-		return p, errors.New(p.LastError)
+	if current.Phase != "ready" {
+		return current, errors.New(current.LastError)
 	}
-	return p, nil
+	return current, nil
 }
 
 func (m *WarpManager) Resume(ctx context.Context, id string) (WarpProfile, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	unlock, err := m.beginProfile(id)
+	if err != nil {
+		return WarpProfile{}, err
+	}
+	defer unlock()
+	ctx, cancel := m.operationContext(ctx)
+	defer cancel()
 	path, err := m.path(id)
 	if err != nil {
 		return WarpProfile{}, err
@@ -556,7 +639,7 @@ func (m *WarpManager) Resume(ctx context.Context, id string) (WarpProfile, error
 	if err != nil {
 		return p, err
 	}
-	if p.Phase == "ready" {
+	if m.liveProfileLocked(p).Phase == "ready" {
 		return p, nil
 	}
 	if p.RegistrationAttempted && !p.Registered {
@@ -566,8 +649,13 @@ func (m *WarpManager) Resume(ctx context.Context, id string) (WarpProfile, error
 }
 
 func (m *WarpManager) Stop(ctx context.Context, id string) (WarpProfile, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	unlock, err := m.beginProfile(id)
+	if err != nil {
+		return WarpProfile{}, err
+	}
+	defer unlock()
+	ctx, cancel := m.operationContext(ctx)
+	defer cancel()
 	if err := ctx.Err(); err != nil {
 		return WarpProfile{}, err
 	}
@@ -586,13 +674,22 @@ func (m *WarpManager) Stop(ctx context.Context, id string) (WarpProfile, error) 
 	if err = m.save(path, p); err != nil {
 		return p, err
 	}
-	m.stopProcessLocked(id)
+	if err = m.stopProcessLocked(id); err != nil {
+		p.Phase, p.LastError = "unknown", err.Error()
+		_ = m.save(path, p)
+		return p, err
+	}
 	return p, nil
 }
 
 func (m *WarpManager) Delete(ctx context.Context, id string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	unlock, err := m.beginProfile(id)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	ctx, cancel := m.operationContext(ctx)
+	defer cancel()
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -609,7 +706,9 @@ func (m *WarpManager) Delete(ctx context.Context, id string) error {
 	if err := m.save(path, p); err != nil {
 		return err
 	}
-	m.stopProcessLocked(id)
+	if err = m.stopProcessLocked(id); err != nil {
+		return err
+	}
 	return os.RemoveAll(path)
 }
 
@@ -630,47 +729,27 @@ func (m *WarpManager) Restore(ctx context.Context) error {
 
 func (m *WarpManager) Close() error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	m.closed = true
+	m.cancel()
+	m.mu.Unlock()
+	m.operations.Wait()
+	m.mu.Lock()
+	ids := make([]string, 0, len(m.processes))
 	for id := range m.processes {
-		m.stopProcessLocked(id)
+		ids = append(ids, id)
 	}
-	return nil
-}
-
-func probeWarpEgress(ctx context.Context, c WarpConnection) (string, error) {
-	u := &url.URL{Scheme: "socks5", Host: fmt.Sprintf("%s:%d", c.Host, c.Port), User: url.UserPassword(c.Username, c.Password)}
-	tr := &http.Transport{Proxy: http.ProxyURL(u), TLSHandshakeTimeout: 5 * time.Second, ResponseHeaderTimeout: 8 * time.Second}
-	defer tr.CloseIdleConnections()
-	client := &http.Client{Transport: tr, Timeout: 12 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://cloudflare.com/cdn-cgi/trace", nil)
-	if err != nil {
-		return "", err
-	}
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", errors.New("WARP 出口检测连接失败")
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != 200 {
-		return "", errors.New("WARP 出口检测响应异常")
-	}
-	reader := bufio.NewScanner(io.LimitReader(resp.Body, 4097))
-	values := map[string]string{}
-	for reader.Scan() {
-		key, value, ok := strings.Cut(reader.Text(), "=")
-		if ok {
-			values[key] = value
+	m.mu.Unlock()
+	var result error
+	for _, id := range ids {
+		lock := m.profileLock(id)
+		lock.Lock()
+		if err := m.stopProcessLocked(id); err != nil {
+			result = err
 		}
+		lock.Unlock()
 	}
-	if reader.Err() != nil {
-		return "", errors.New("WARP 出口检测读取失败")
+	if result == nil {
+		m.watchers.Wait()
 	}
-	ip := net.ParseIP(values["ip"])
-	if ip == nil || !ip.IsGlobalUnicast() || ip.IsPrivate() {
-		return "", errors.New("WARP 出口未返回公网 IP")
-	}
-	if values["warp"] != "on" && values["warp"] != "plus" {
-		return "", errors.New("WARP 出口未报告已启用")
-	}
-	return ip.String(), nil
+	return result
 }
