@@ -180,6 +180,13 @@ func (s *Server) pgDeleteTask(w http.ResponseWriter, r *http.Request) {
 			writeCommittedTaskDelete(w, result, err)
 			return
 		}
+		if errors.Is(err, db.ErrProxyInUse) || errors.Is(err, db.ErrProxySwitchRecovery) {
+			writeJSON(w, http.StatusConflict, map[string]any{
+				"code":  "task_activity_conflict",
+				"error": "任务存在未解除的活动占用，删除未执行；请先暂停，确认旧操作退出后恢复占用，再重试删除",
+			})
+			return
+		}
 		writeErr(w, 500, err.Error())
 		return
 	}

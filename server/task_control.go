@@ -106,10 +106,8 @@ func (s *Server) applyTaskControlWithCause(t *Task, action string, pauseCause er
 		if !exists || current != t || s.engine.IsDeleting(t.ID) {
 			return out, fmt.Errorf("任务正在删除，无法控制")
 		}
-		if !s.engine.beginTaskOperation(t.ID) {
-			return out, fmt.Errorf("任务正在删除，无法控制")
-		}
-		defer s.engine.decInflight(t.ID)
+		// 暂停只关闭执行并请求取消，不产生新的出站操作，不能依赖代理准入。
+		// concMu 与上面的删除检查继续串行化控制；现存引用只能在真实退出后释放。
 		lifecycle := t.lifecycleSnapshot()
 		if isTerminalStatus(lifecycle.Status) {
 			return out, fmt.Errorf("终态任务不能执行暂停")
@@ -117,18 +115,14 @@ func (s *Server) applyTaskControlWithCause(t *Task, action string, pauseCause er
 		if lifecycle.Paused {
 			return out, fmt.Errorf("任务已经暂停")
 		}
-		wasQueued := lifecycle.Queued
-		wasEnginePaused := s.engine.IsPaused(t.ID)
 		if pauseCause == nil {
 			pauseCause = agent.AbortPausedByUser
 		}
-		s.engine.Pause(t.ID, pauseCause)
 		if err := s.m.ApplyTaskPause(t.ID); err != nil {
-			if !wasEnginePaused && !wasQueued {
-				s.engine.Resume(t)
-			}
 			return out, err
 		}
+		// 先持久化，再取消执行与请求出口回收；失败请求不能销毁原执行上下文。
+		s.engine.Pause(t.ID, pauseCause)
 		// Main Agent is independently cancellable. Only cancel its current turn
 		// after the persistent pause commits, so a failed control request is fully
 		// compensated and does not lose an otherwise valid conversation turn.
