@@ -19,6 +19,28 @@ test("任务/对话路径及DTO主体隔离，GET不重新采样", async () => {
   await assert.rejects(proxyPolicyAPI.policy({ kind: "task", id: "2" }), /主体/);
   assert.deepEqual(calls, ["/api/conversations/2/proxy", "/api/tasks/2/proxy"]);
 });
+test("任务固定大ID以字符串PUT并通过主体GET精确回读", async () => {
+  const big = "9007199254740993";
+  const calls = [];
+  const subject = { kind: "task", id: "2" };
+  const input = { expected_revision: 0, proxy_mode: "fixed", proxy_id: big, allowed_group_ids: [], agent_failover_enabled: false, failover_cooldown_seconds: 60, failover_max_switches: 3 };
+  globalThis.fetch = async (url, init) => {
+    calls.push({ url, method: init?.method ?? "GET", body: init?.body ? JSON.parse(init.body) : null });
+    if (init?.method === "PUT") return Response.json({ proxy_id: 9007199254740992 });
+    return Response.json({ subject_kind: "task", subject_id: "2", proxy_revision: 1, proxy_mode: "fixed", proxy_id: big, allowed_group_ids: [], agent_failover_enabled: false, failover_cooldown_seconds: 60, failover_max_switches: 3, remaining_switches: 3, recovery_required: false });
+  };
+  const flow = new RevisionSubmission();
+  const value = await flow.submit(
+    () => proxyPolicyAPI.save(subject, input),
+    () => proxyPolicyAPI.policy(subject),
+    (current) => current.proxy_revision === 1 && current.proxy_id === big,
+  );
+  assert.equal(value.proxy_id, big);
+  assert.deepEqual(calls, [
+    { url: "/api/tasks/2/proxy", method: "PUT", body: input },
+    { url: "/api/tasks/2/proxy", method: "GET", body: null },
+  ]);
+});
 test("异步请求202返回pending原编号，成功写入202也不能当完成", async () => {
   let calls = 0;
   globalThis.fetch = async () => { calls++; return Response.json({ accepted: true, request: { id: "11", subject_kind: "task", subject_id: "2", state: "pending" }, end_turn: true }, { status: 202 }); };

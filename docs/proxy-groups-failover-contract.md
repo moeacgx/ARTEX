@@ -1,7 +1,7 @@
 # 代理分组、主体策略与故障切换合同
 
 后端基线：`6dc3c3e`。本合同供前端和整合 owner 接线；实现与验证尚在进行。
-WARP 健康 DTO 由独立 owner 提供，不在本文猜测字段。新增组与主体策略 ID 使用字符串正整数；既有 TaskDTO.proxy_id 与 ProxyDTO.id 保留数字。版本使用 JSON 非负安全整数；时间为 RFC3339 或 null。代理成员只引用档案 ID，不复制凭据，响应沿用脱敏 ProxyDTO。
+WARP 健康 DTO 由独立 owner 提供，不在本文猜测字段。所有代理中心身份响应（含 ProxyDTO.id、WARP 健康/策略 proxy_id、分组成员嵌入 ProxyDTO、候选、切换和 global_proxy_id）使用十进制字符串；TaskDTO.proxy_id 的历史响应仍可为数字，任务 PUT 的数字 proxy_id 必须兼容。版本使用 JSON 非负安全整数；时间为 RFC3339 或 null。代理成员只引用档案 ID，不复制凭据，响应沿用脱敏 ProxyDTO。
 
 ## 分组接口
 
@@ -26,7 +26,7 @@ Resin 可以出现在档案列表，但 group 候选返回 `supported:false,unsu
 
 `ProxyPolicyDTO = {subject_kind:"task"|"conversation",subject_id,proxy_mode,proxy_id,proxy_revision,allowed_group_ids,agent_failover_enabled,failover_cooldown_seconds,failover_max_switches,authorization_revision,proxy:ProxyDTO|null,exit_verified_at:string|null,latest_switch:ProxySwitchRequestDTO|null,cooldown_until:string|null,remaining_switches:整数}`。
 
-任务 PUT 保留既有任务详情响应（兼容其数字 `proxy_id`），同时增加上述策略字段；对话 PUT 和主体 proxy GET 返回 ProxyPolicyDTO，使用字符串 `proxy_id`。`ProxyDTO.id` 同样保留既有数字类型。组 revision 冲突为 `proxy_group_revision_conflict`；主体冲突保留 `proxy_revision_conflict`；真实占用保留 `proxy_busy`。错误响应沿用 `{error,code,...}`，409 主体冲突附 `current_revision`。未知或结果不确定时客户端仅 GET 对账。策略 DTO 另含 `recovery_required:boolean`，仅表示持久切换屏障需要管理恢复。
+任务 PUT 保留既有任务详情响应（兼容其数字 `proxy_id`），同时接受数字或十进制字符串输入；新客户端发送字符串，并以主体 GET 的 ProxyPolicyDTO 字符串 `proxy_id` 作权威回读，不能用 TaskDTO 的历史数字字段核对大 ID。对话 PUT 和主体 proxy GET 返回 ProxyPolicyDTO，使用字符串 `proxy_id`。`ProxyDTO.id` 统一使用十进制字符串；global proxy 的响应也使用字符串，旧 global/task/proxy 管理请求仍接受数字并可接受规范正数字符串。组 revision 冲突为 `proxy_group_revision_conflict`；主体冲突保留 `proxy_revision_conflict`；真实占用保留 `proxy_busy`。错误响应沿用 `{error,code,...}`，409 主体冲突附 `current_revision`。未知或结果不确定时客户端仅 GET 对账。策略 DTO 另含 `recovery_required:boolean`，仅表示持久切换屏障需要管理恢复。
 
 - `POST /api/{tasks|conversations}/{id}/proxy/policy-recovery`：新主体屏障的人工恢复入口，请求必须含 `expected_revision` 和 `action`。`retry` 只重新提交原持久目标，不重新采样 inherit、不重置预算、不重放业务工具。`replace_policy` 必须同时提供完整期望 `proxy_mode` 和相应策略字段，明确提交新的人工策略。原目标被撤权或禁用时可用此操作重新授予有效策略，旧请求记为 failed。成功 `200 ProxyPolicyDTO`。
 - Resin 回收结果不明确时 `retry` 不再次 DELETE。人工核对远端旧租约已释放后可用 `confirm_released`，或 `confirm_released_replace_policy` 加完整新策略；它们先校验原材料身份再标记原记录 released，不允许覆盖旧材料。仍有真实活动、清理未退出或版本不匹配时均拒绝恢复。此入口没有 `abort_direct`，不能让 Agent 越过分组授权屏障；旧任务非分组恢复接口保持兼容。

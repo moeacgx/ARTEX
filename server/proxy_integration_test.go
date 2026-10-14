@@ -63,7 +63,7 @@ func proxyIntegrationDSNAllowed(dsn string) bool {
 	// pgx 的查询参数能够覆盖主机、端口或库名，只接受已授权的本地测试参数。
 	return err == nil && u.Host == "127.0.0.1:25432" &&
 		(u.Scheme == "postgres" || u.Scheme == "postgresql") &&
-		(u.Path == "/artex_proxy_test" || u.Path == "/artex_proxy_verify_test") &&
+		(u.Path == "/artex_proxy_test" || u.Path == "/artex_proxy_verify_test" || u.Path == "/artex_proxy_id_string_20261015") &&
 		u.RawQuery == "sslmode=disable" && u.Fragment == ""
 }
 
@@ -139,7 +139,10 @@ func TestProxyPGHTTPUpdateContract(t *testing.T) {
 	if code != 201 {
 		t.Fatalf("创建: %d %s", code, body)
 	}
-	id := int64(out["id"].(float64))
+	id, err := strconv.ParseInt(out["id"].(string), 10, 64)
+	if err != nil {
+		t.Fatal(err)
+	}
 	t.Cleanup(func() { _, _ = s.m.pg.Exec(`DELETE FROM outbound_proxies WHERE id=$1`, id) })
 	path := fmt.Sprintf("/api/proxies/%d", id)
 	if out["protocol"] != "http" || out["has_password"] != true || strings.Contains(body, "explicit-secret") || strings.Contains(body, "url-secret") {
@@ -386,7 +389,7 @@ func TestProxyPGLegacyMigrationAndWarpDTO(t *testing.T) {
 		t.Fatal(err)
 	}
 	code, out, body := proxyAPI(t, mux, "POST", fmt.Sprintf("/api/proxies/%d/warp/stop", p.ID), "")
-	if code != 200 || out["id"] != float64(p.ID) || out["status"] != "stopped" || out["protocol"] != "socks5" {
+	if code != 200 || out["id"] != i64s(p.ID) || out["status"] != "stopped" || out["protocol"] != "socks5" {
 		t.Fatalf("WARP未返回ProxyDTO: %d %s", code, body)
 	}
 	code, _, _ = proxyAPI(t, mux, "POST", fmt.Sprintf("/api/proxies/%d/test", p.ID), "")
@@ -421,7 +424,10 @@ func TestProxyPGResinCredentialsAndUncertainRelease(t *testing.T) {
 	if code != 201 {
 		t.Fatal(body)
 	}
-	id := int64(out["id"].(float64))
+	id, err := strconv.ParseInt(out["id"].(string), 10, 64)
+	if err != nil {
+		t.Fatal(err)
+	}
 	t.Cleanup(func() { _, _ = s.m.pg.Exec(`DELETE FROM outbound_proxies WHERE id=$1`, id) })
 	path := fmt.Sprintf("/api/proxies/%d", id)
 	code, out, body = proxyAPI(t, mux, "PUT", path, fmt.Sprintf(`{"name":"resin","kind":"resin","protocol":"http","host":"localhost","port":1080,"resin_admin_url":%q}`, admin.URL))
@@ -550,7 +556,7 @@ func TestProxyPGBrowserCloneAndResinRelease(t *testing.T) {
 		t.Fatal(err)
 	}
 	code, out, body := proxyAPI(t, mux, "POST", fmt.Sprintf("/api/proxies/%d/resin/release", p.ID), "")
-	if code != 200 || out["id"] != float64(p.ID) || out["protocol"] != "http" || strings.Contains(body, "secret") {
+	if code != 200 || out["id"] != i64s(p.ID) || out["protocol"] != "http" || strings.Contains(body, "secret") {
 		t.Fatalf("回收DTO: %d %s", code, body)
 	}
 	if err = s.m.ReleaseTaskProxy(context.Background(), task); err != nil || deletes.Load() != 1 {

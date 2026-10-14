@@ -22,7 +22,7 @@ const proxyToolInputLimit = 128 << 10
 
 // 所有回显采用白名单，既不返回原始错误，也不序列化数据库代理实体。
 type proxyToolView struct {
-	ID      int64        `json:"proxy_id"`
+	ID      string       `json:"proxy_id"`
 	Name    string       `json:"name"`
 	Kind    db.ProxyKind `json:"kind"`
 	Status  string       `json:"status"`
@@ -73,7 +73,7 @@ func proxyToolDTO(p *db.Proxy) *proxyToolView {
 			address = protocol + "://" + net.JoinHostPort(p.Host, strconv.Itoa(port))
 		}
 	}
-	return &proxyToolView{ID: p.ID, Name: name, Kind: p.Kind, Status: status, Address: address}
+	return &proxyToolView{ID: i64s(p.ID), Name: name, Kind: p.Kind, Status: status, Address: address}
 }
 
 type proxyAddItem struct {
@@ -327,7 +327,7 @@ func (s *Server) testProxyItems(ctx context.Context, a proxyTestInput) []proxyIt
 				}
 				view := proxyToolDTO(p)
 				if view == nil {
-					view = &proxyToolView{ID: a.ProxyIDs[i], Status: "unavailable"}
+					view = &proxyToolView{ID: i64s(a.ProxyIDs[i]), Status: "unavailable"}
 				}
 				out[i] = proxyItemResult{Proxy: view, OperationStatus: state, ErrorCode: code}
 			}

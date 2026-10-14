@@ -6,7 +6,7 @@ import test from "node:test";
 
 const key = "11000000-0000-4000-8000-000000000001";
 const body = { name: "合成 WARP", kind: "warp", accept_terms: true };
-const proxy = { id: 31, ...body, enabled: true, status: "failed", warp_phase: "failed" };
+const proxy = { id: "31", ...body, enabled: true, status: "failed", warp_phase: "failed" };
 const originalFetch = globalThis.fetch;
 test.afterEach(() => {
   globalThis.fetch = originalFetch;
@@ -48,13 +48,13 @@ test("API 客户端载荷：首发和网络重试沿用已持久化的 key 与�
 
 for (const status of [202, 502]) {
   test(`API 客户端响应：${status} pending 保留包和原 ID，failed DTO 也不能进入 recover`, async () => {
-    const payload = { error: "合成处理中", proxy_id: 31, proxy, operation_status: "pending" };
+    const payload = { error: "合成处理中", proxy_id: "31", proxy, operation_status: "pending" };
     globalThis.fetch = async () => Response.json(payload, { status });
     await assert.rejects(api.createProxy(body, key), (error) => {
       assert.ok(error instanceof APIError);
       assert.equal(error.status, status);
       assert.deepEqual(error.payload, payload);
-      assert.deepEqual(warpCreateFailure(error), { stage: "pending", id: 31, proxy });
+      assert.deepEqual(warpCreateFailure(error), { stage: "pending", id: "31", proxy });
       return true;
     });
   });
@@ -66,7 +66,7 @@ test("API 客户端响应：502 failed、409冲突、410 tombstone 分别保留�
     [409, "conflict"],
     [410, "deleted"],
   ]) {
-    const payload = { error: "合成终态", operation_status: "failed", proxy_id: 31, proxy };
+    const payload = { error: "合成终态", operation_status: "failed", proxy_id: "31", proxy };
     globalThis.fetch = async () => Response.json(payload, { status });
     await assert.rejects(api.createProxy(body, key), (error) => {
       assert.deepEqual(error.payload, payload);

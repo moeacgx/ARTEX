@@ -7,7 +7,7 @@ export type ProxyKind = "http" | "https" | "socks5" | "warp" | "resin";
 export type TaskProxyMode = "inherit" | "direct" | "fixed";
 
 export interface WarpHealth {
-  proxy_id: number;
+  proxy_id: string;
   desired_running: boolean;
   state: "unknown" | "stopped" | "disabled" | "pending" | "checking" | "ready" | "failed" | "deferred" | "repairing";
   consecutive_failures: number;
@@ -20,7 +20,7 @@ export interface WarpHealth {
 }
 
 export interface ProxyRecord {
-  id: number;
+  id: string;
   name: string;
   kind: ProxyKind;
   protocol?: "http" | "socks5" | string;

@@ -12,17 +12,17 @@ import (
 )
 
 type warpHealthPolicyDTO struct {
-	ProxyID              int64 `json:"proxy_id"`
-	Revision             int64 `json:"revision"`
-	AutoRecoverEnabled   bool  `json:"auto_recover_enabled"`
-	ProbeIntervalSeconds int   `json:"probe_interval_seconds"`
-	FailureThreshold     int   `json:"failure_threshold"`
-	RecoveryMinSeconds   int   `json:"recovery_min_seconds"`
-	RecoveryMaxSeconds   int   `json:"recovery_max_seconds"`
+	ProxyID              string `json:"proxy_id"`
+	Revision             int64  `json:"revision"`
+	AutoRecoverEnabled   bool   `json:"auto_recover_enabled"`
+	ProbeIntervalSeconds int    `json:"probe_interval_seconds"`
+	FailureThreshold     int    `json:"failure_threshold"`
+	RecoveryMinSeconds   int    `json:"recovery_min_seconds"`
+	RecoveryMaxSeconds   int    `json:"recovery_max_seconds"`
 }
 
 func warpPolicyDTO(state db.WarpHealthState) warpHealthPolicyDTO {
-	return warpHealthPolicyDTO{ProxyID: state.ProxyID, Revision: state.Revision, AutoRecoverEnabled: state.AutoRecoverEnabled, ProbeIntervalSeconds: 60, FailureThreshold: 3, RecoveryMinSeconds: 300, RecoveryMaxSeconds: 3600}
+	return warpHealthPolicyDTO{ProxyID: i64s(state.ProxyID), Revision: state.Revision, AutoRecoverEnabled: state.AutoRecoverEnabled, ProbeIntervalSeconds: 60, FailureThreshold: 3, RecoveryMinSeconds: 300, RecoveryMaxSeconds: 3600}
 }
 
 func (s *Server) warpHealthPolicy(w http.ResponseWriter, r *http.Request) {

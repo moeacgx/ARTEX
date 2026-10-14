@@ -89,29 +89,29 @@ function badgeVariant(status: string): "default" | "secondary" | "destructive" {
 
 export function ProxyCenter() {
   const [items, setItems] = React.useState<ProxyRecord[]>([]);
-  const [globalID, setGlobalID] = React.useState<number | null>(null);
+  const [globalID, setGlobalID] = React.useState<string | null>(null);
   const [form, setForm] = React.useState<Form>(freshForm);
   const [editing, setEditing] = React.useState<ProxyRecord | null>(null);
   const [loading, setLoading] = React.useState(true);
   const [loadError, setLoadError] = React.useState("");
   const [busy, setBusy] = React.useState("");
   const [deleting, setDeleting] = React.useState<ProxyRecord | null>(null);
-  const [releasing, setReleasing] = React.useState<number | null>(null);
-  const [releaseReadback, setReleaseReadback] = React.useState<number[]>([]);
-  const releaseSubmitted = React.useRef(new Set<number>());
+  const [releasing, setReleasing] = React.useState<string | null>(null);
+  const [releaseReadback, setReleaseReadback] = React.useState<string[]>([]);
+  const releaseSubmitted = React.useRef(new Set<string>());
   const mutationLock = React.useRef(false);
   const [saveError, setSaveError] = React.useState("");
   const [warpCreation] = React.useState(() => new WarpCreateIntent());
   const [createIntent, setCreateIntent] = React.useState<WarpIntent | null>(null);
   const [createStage, setCreateStage] = React.useState<WarpCreateStage>("draft");
   const [intentStorageError, setIntentStorageError] = React.useState("正在读取本地 WARP 意图…");
-  const [pendingID, setPendingID] = React.useState<number | null>(null);
+  const [pendingID, setPendingID] = React.useState<string | null>(null);
   const [pollAttempt, setPollAttempt] = React.useState(0);
   const pollLock = React.useRef(false);
-  const [registrationUncertain, setRegistrationUncertain] = React.useState<number[]>([]);
+  const [registrationUncertain, setRegistrationUncertain] = React.useState<string[]>([]);
   // WARP 注册条款确认：registering 记录待确认的代理编号；acceptTerms 必须由用户
   // 手动勾选（每次打开都重置为 false，绝不预选）。
-  const [registering, setRegistering] = React.useState<number | null>(null);
+  const [registering, setRegistering] = React.useState<string | null>(null);
   const [acceptTerms, setAcceptTerms] = React.useState(false);
 
   const restoreIntent = React.useCallback(() => {
@@ -351,7 +351,7 @@ export function ProxyCenter() {
       setBusy("");
     }
   }
-  async function choose(id: number | null) {
+  async function choose(id: string | null) {
     setBusy("global");
     try {
       await api.setGlobalProxy(id);
@@ -363,7 +363,7 @@ export function ProxyCenter() {
       setBusy("");
     }
   }
-  async function test(id: number) {
+  async function test(id: string) {
     setBusy(`test:${id}`);
     try {
       const result = await api.testProxy(id);
@@ -383,7 +383,7 @@ export function ProxyCenter() {
   }
   // 注册必须由用户先确认条款：只有确认后才会带着 accept_terms:true 调用；
   // start/stop/recover 不涉及条款，也不带请求体。
-  async function warp(id: number, action: "register" | "start" | "stop" | "recover") {
+  async function warp(id: string, action: "register" | "start" | "stop" | "recover") {
     if (mutationLock.current) return;
     if (createStage === "pending" && pendingID === id) return;
     const current = items.find((item) => item.id === id) ?? (editing?.id === id ? editing : null);
@@ -428,7 +428,7 @@ export function ProxyCenter() {
       setBusy("");
     }
   }
-  async function release(id: number) {
+  async function release(id: string) {
     if (mutationLock.current) return;
     mutationLock.current = true;
     setBusy(`resin:${id}`);

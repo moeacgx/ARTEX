@@ -2,7 +2,8 @@ import { warpReady } from "./proxy-center";
 import type { ProxyRecord, Task, TaskProxyMode } from "./types";
 
 export type TaskProxyDraft = { mode: TaskProxyMode | ""; id: string };
-export type TaskProxyInput = { proxy_mode: TaskProxyMode; proxy_id: number | null; expected_revision: number };
+// Task PUT 的新客户端载荷使用字符串，服务端仍兼容历史数字载荷。
+export type TaskProxyInput = { proxy_mode: TaskProxyMode; proxy_id: string | null; expected_revision: number };
 
 export function validProxyRevision(value: unknown): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
@@ -15,10 +16,12 @@ export function proxyRevisionConflict(error: unknown): boolean {
 
 export function taskProxyDraft(task: Task): TaskProxyDraft {
   const mode = task.proxy_mode;
-  const id = task.proxy_id ?? task.proxy?.id;
+  // TaskDTO.proxy_id 是历史数字字段，可能已经被 JS 舍入；字符串快照只作
+  // 显示兼容，权威状态由主体 GET 的 ProxyPolicyDTO 提供。
+  const id = task.proxy?.id ?? (typeof task.proxy_id === "number" && Number.isSafeInteger(task.proxy_id) ? String(task.proxy_id) : "");
   return {
     mode: mode === "inherit" || mode === "direct" || mode === "fixed" ? mode : "",
-    id: typeof id === "number" && id > 0 ? String(id) : "",
+    id: typeof id === "string" && /^[1-9]\d*$/.test(id) ? id : "",
   };
 }
 
@@ -26,11 +29,10 @@ export function taskProxyInput(draft: TaskProxyDraft, revision: unknown): TaskPr
   if (!validProxyRevision(revision)) throw new Error("任务代理版本缺失或无效，请重新读取任务后再切换");
   if (draft.mode === "inherit" || draft.mode === "direct")
     return { proxy_mode: draft.mode, proxy_id: null, expected_revision: revision };
-  const id = Number(draft.id);
-  if (draft.mode !== "fixed" || !/^[1-9]\d*$/.test(draft.id) || !Number.isSafeInteger(id)) {
+  if (draft.mode !== "fixed" || !/^[1-9]\d*$/.test(draft.id)) {
     throw new Error("请明确选择连接方式与有效的代理编号");
   }
-  return { proxy_mode: "fixed", proxy_id: id, expected_revision: revision };
+  return { proxy_mode: "fixed", proxy_id: draft.id, expected_revision: revision };
 }
 
 // 切换现有任务比新建目录展示更严格；unknown 不能被当作健康代理选入。
@@ -52,7 +54,7 @@ export function taskProxySwitchError(input: {
   task: Task;
   draft: TaskProxyDraft;
   items: ProxyRecord[];
-  globalID: number | null;
+  globalID: string | null;
   loading: boolean;
   error: string;
 }): string {
@@ -69,7 +71,10 @@ export function taskProxySwitchError(input: {
   } catch (error) {
     return (error as Error).message;
   }
-  const id = data.proxy_mode === "inherit" ? input.globalID : data.proxy_id;
+  let id: string | null;
+  if (data.proxy_mode === "inherit") id = input.globalID;
+  else if (data.proxy_id === null) id = null;
+  else id = String(data.proxy_id);
   if (id !== null) {
     const item = input.items.find((item) => item.id === id);
     if (!item || !taskProxySwitchSelectable(item)) return `代理 #${id} 已不可用或尚未验证，请检测或重新选择。`;

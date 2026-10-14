@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -48,6 +49,19 @@ func warpCreateHTTP(t *testing.T, handler http.Handler, key, body string, discar
 	return resp.StatusCode, out, string(data)
 }
 
+func proxyResponseID(t *testing.T, out map[string]any, key string) int64 {
+	t.Helper()
+	raw, ok := out[key].(string)
+	if !ok {
+		t.Fatalf("响应 %s 不是十进制字符串: %#v", key, out[key])
+	}
+	id, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || id <= 0 {
+		t.Fatalf("响应 %s 不是有效代理编号: %#v", key, out[key])
+	}
+	return id
+}
+
 func TestProxyPGWarpCreateIdempotency(t *testing.T) {
 	if warpFixtureSubprocess(t) {
 		return
@@ -79,11 +93,8 @@ func TestProxyPGWarpCreateIdempotency(t *testing.T) {
 	if code != 201 {
 		t.Errorf("断响应后同key未复用: %d %s", code, raw)
 	}
-	id, ok := replay["id"].(float64)
-	if !ok {
-		t.Fatalf("重放未返回原ID: %s", raw)
-	}
-	t.Cleanup(func() { _ = s.m.pg.DeleteProxy(int64(id)) })
+	id := proxyResponseID(t, replay, "id")
+	t.Cleanup(func() { _ = s.m.pg.DeleteProxy(id) })
 	var ids []int64
 	rows, err := s.m.pg.Query(`SELECT id FROM outbound_proxies WHERE name='重放测试'`)
 	if err != nil {
@@ -97,7 +108,7 @@ func TestProxyPGWarpCreateIdempotency(t *testing.T) {
 		ids = append(ids, v)
 	}
 	rows.Close()
-	if len(ids) != 1 || ids[0] != int64(id) {
+	if len(ids) != 1 || ids[0] != id {
 		t.Errorf("相同意图创建了多行: ids=%v replay=%v", ids, id)
 	}
 	code, _, raw = warpCreateHTTP(t, mux, key, `{"name":"同key异请求","kind":"warp","accept_terms":true}`, false)
@@ -111,7 +122,7 @@ func TestProxyPGWarpCreateIdempotency(t *testing.T) {
 	if strings.Count(string(calls), "register\n") != 1 {
 		t.Errorf("断响应重放导致重复注册: %s", calls)
 	}
-	path := fmt.Sprintf("/api/proxies/%d", int64(id))
+	path := fmt.Sprintf("/api/proxies/%d", id)
 	if c, _, r := proxyAPI(t, mux, "POST", path+"/warp/stop", ""); c != 200 {
 		t.Fatal(r)
 	}
@@ -191,7 +202,7 @@ func TestProxyPGWarpCreateConcurrentManagers(t *testing.T) {
 	if time.Since(start) > 500*time.Millisecond {
 		t.Errorf("第二Manager等在全局DB网络锁: %s", time.Since(start))
 	}
-	if code != 202 || out["proxy_id"] != float64(id) || out["operation_status"] != "pending" {
+	if code != 202 || out["proxy_id"] != i64s(id) || out["operation_status"] != "pending" {
 		t.Errorf("并发重放没有返回同一pending意图: %d %s", code, raw)
 	}
 	if err := otherDB.SetProxyStatus(id, db.ProxyStatusHealthy, "", time.Now()); !errors.Is(err, db.ErrProxyInUse) {
@@ -216,11 +227,11 @@ func TestProxyPGWarpCreateConcurrentManagers(t *testing.T) {
 		t.Fatal(err)
 	}
 	result := <-first
-	if result.code != 201 || result.out["id"] != float64(id) {
+	if result.code != 201 || result.out["id"] != i64s(id) {
 		t.Errorf("首请求未完成原ID: %d %s", result.code, result.raw)
 	}
 	code, out, raw = warpCreateHTTP(t, otherMux, key, body, false)
-	if code != 201 || out["id"] != float64(id) {
+	if code != 201 || out["id"] != i64s(id) {
 		t.Errorf("跨Manager完成重放未复用原ID: %d %s", code, raw)
 	}
 	calls, err := os.ReadFile(logPath)
@@ -260,7 +271,7 @@ func TestProxyPGWarpCreateOrphanPending(t *testing.T) {
 		_ = s.m.pg.DeleteProxy(p.ID)
 	})
 	code, replay, raw := warpCreateHTTP(t, mux, key, body, false)
-	if code != 202 || replay["proxy_id"] != float64(p.ID) || replay["operation_status"] != "pending" {
+	if code != 202 || replay["proxy_id"] != i64s(p.ID) || replay["operation_status"] != "pending" {
 		t.Fatalf("遗留意图被重新执行: %d %s", code, raw)
 	}
 	if _, err := os.Stat(logPath); !os.IsNotExist(err) {
@@ -278,11 +289,15 @@ func TestProxyPGWarpCreatePayloadWhitelist(t *testing.T) {
 	t.Setenv("ARTEX_WARP_FIXTURE_MODE", "ready")
 	const invalid = `{"name":"非法WARP载荷","kind":"warp","accept_terms":true,"url":"socks5://127.0.0.1:1080","password":"private","resin_admin_token":"secret","extra":"ignored"}`
 	code, out, raw := warpCreateHTTP(t, mux, uuid.NewString(), invalid, false)
-	if id, ok := out["id"].(float64); ok {
-		if rt, err := s.m.proxyRuntime(); err == nil {
-			_, _ = rt.warp.Stop(t.Context(), warpProfileID(int64(id)))
+	if rawID, ok := out["id"].(string); ok {
+		id, parseErr := strconv.ParseInt(rawID, 10, 64)
+		if parseErr != nil {
+			t.Fatalf("WARP 错误响应编号无效: %q", rawID)
 		}
-		_ = s.m.pg.DeleteProxy(int64(id))
+		if rt, err := s.m.proxyRuntime(); err == nil {
+			_, _ = rt.warp.Stop(t.Context(), warpProfileID(id))
+		}
+		_ = s.m.pg.DeleteProxy(id)
 	}
 	if code != 400 {
 		t.Errorf("额外WARP配置或秘密未拒绝: %d %s", code, raw)
@@ -292,7 +307,7 @@ func TestProxyPGWarpCreatePayloadWhitelist(t *testing.T) {
 	if code != 201 {
 		t.Fatalf("规范名称首次创建失败: %d %s", code, raw)
 	}
-	id := int64(first["id"].(float64))
+	id := proxyResponseID(t, first, "id")
 	t.Cleanup(func() {
 		if rt, err := s.m.proxyRuntime(); err == nil {
 			_, _ = rt.warp.Stop(t.Context(), warpProfileID(id))
@@ -302,7 +317,7 @@ func TestProxyPGWarpCreatePayloadWhitelist(t *testing.T) {
 		}
 	})
 	code, replay, raw := warpCreateHTTP(t, mux, key, `{"name":"规范名称","kind":"warp","accept_terms":true,"enabled":true}`, false)
-	if code != 201 || replay["id"] != float64(id) {
+	if code != 201 || replay["id"] != i64s(id) {
 		t.Errorf("同语义请求未复用ID: %d %s", code, raw)
 	}
 }
@@ -322,10 +337,10 @@ func TestProxyPGWarpCreateFailureAndRestart(t *testing.T) {
 	if code != 502 {
 		t.Fatalf("注册失败状态错误: %d %s", code, raw)
 	}
-	id := first["proxy_id"].(float64)
-	t.Cleanup(func() { _ = s.m.pg.DeleteProxy(int64(id)) })
+	id := proxyResponseID(t, first, "proxy_id")
+	t.Cleanup(func() { _ = s.m.pg.DeleteProxy(id) })
 	code, replay, raw := warpCreateHTTP(t, mux, key, body, false)
-	if code != 502 || replay["proxy_id"] != id {
+	if code != 502 || replay["proxy_id"] != i64s(id) {
 		t.Errorf("失败重放未保留原ID: %d %s", code, raw)
 	}
 	if err := s.m.CloseProxyRuntime(); err != nil {
@@ -345,7 +360,7 @@ func TestProxyPGWarpCreateFailureAndRestart(t *testing.T) {
 	nextMux := http.NewServeMux()
 	nextMux.HandleFunc("POST /api/proxies", next.createProxy)
 	code, replay, raw = warpCreateHTTP(t, nextMux, key, body, false)
-	if code != 502 || replay["proxy_id"] != id {
+	if code != 502 || replay["proxy_id"] != i64s(id) {
 		t.Errorf("重启后失败意图丢失: %d %s", code, raw)
 	}
 	calls, err := os.ReadFile(logPath)

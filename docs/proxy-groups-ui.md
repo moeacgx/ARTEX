@@ -23,7 +23,7 @@
 最终分组/策略合同完整只读自后端树 `docs/proxy-groups-failover-contract.md`。
 WARP 默认健康文档完整只读自 WARP 专属树 `docs/proxy-warp-health-contract.md`；开关和人工恢复按主脑转发的最终 HTTP 签名接线。
 
-`proxy-policy-api.ts` 封装 `/api/proxy-groups` CRUD、members CAS、任务/对话 GET/PUT proxy、POST switch-requests、GET 原请求与 POST policy-recovery。任务 PUT 返回完整 TaskDTO（数字 proxy_id），组件通过主体 GET 回读字符串 ID 的 ProxyPolicyDTO；恢复成功同样必须 GET 核对屏障已解除。
+`proxy-policy-api.ts` 封装 `/api/proxy-groups` CRUD、members CAS、任务/对话 GET/PUT proxy、POST switch-requests、GET 原请求与 POST policy-recovery。代理中心 `ProxyRecord.id`、WARP 健康/策略 `proxy_id` 和 global proxy ID 均按字符串解析；任务 PUT 新路径发送字符串 `proxy_id`（服务端仍兼容历史数字），组件通过主体 GET 回读字符串 ID 的 ProxyPolicyDTO，不能用 TaskDTO 历史数字字段核对大 ID；恢复成功同样必须 GET 核对屏障已解除。
 `warp-health-api.ts` 封装 GET/PUT `/api/proxies/{id}/health-policy` 和 POST `/api/proxies/{id}/health/recovery`。
 生产组件默认使用真实 HTTP adapter，未将合成数据或 fixture 导入生产代码。新建任务的通用接口未获得 group 创建合同，因此不猜字段或在创建后隐式追加授权；在任务详情明确保存 group 策略。
 
@@ -39,7 +39,7 @@ $env:NEXT_EXPORT='1'
 node node_modules/next/dist/bin/next build
 ```
 
-78 项行为/API 回归通过；整组测试由 runner 强制最多 60 秒。覆盖双击、CAS、未知只读、202、Resin/组外候选、有效 IP、稳定 WARP UUID、保留条目、独立持久屏障与人工策略恢复。
+78 项原行为/API 回归及 2 项超安全整数 ID 增量回归（WARP 与任务策略）构成 80 项；整组测试由 runner 强制最多 60 秒。提交前完整运行到 79 项，新增任务策略项另以定向 runner 通过。覆盖双击、CAS、未知只读、202、Resin/组外候选、有效 IP、稳定 WARP UUID、保留条目、独立持久屏障、人工策略恢复和字符串 ID 精度。
 `tsc` 通过；本次修改文件的 Biome lint 与格式检查无 error。格式器只处理本轮修改文件，Git 差异没有无关整页内容改写。
 非 mock 静态构建通过，32 个页面。产物来自本工作树；验证服务使用独立 `127.0.0.1:19431`。
 

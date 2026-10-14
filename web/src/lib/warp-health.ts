@@ -7,7 +7,7 @@ export function warpEffectiveIP(proxy: ProxyRecord): string | null {
     proxy.kind !== "warp" ||
     !proxy.enabled ||
     proxy.status !== "healthy" ||
-    health.proxy_id !== Number(proxy.id) ||
+    health.proxy_id !== proxy.id ||
     !health.desired_running ||
     health.state !== "ready" ||
     !health.last_checked_at ||
@@ -18,7 +18,7 @@ export function warpEffectiveIP(proxy: ProxyRecord): string | null {
 }
 
 export type WarpHealthPolicy = {
-  proxy_id: number;
+  proxy_id: string;
   revision: number;
   auto_recover_enabled: boolean;
   probe_interval_seconds: 60;

@@ -122,12 +122,12 @@ ImportProfile 仅在未导入时读取磁盘明确 Desired、RegistrationAttempt
 
 共享 HTTP 由整合 owner 接线：
 
-- GET /api/proxies/{id}/health-policy：200 返回 proxy_id（数字）、revision、auto_recover_enabled、probe_interval_seconds=60、failure_threshold=3、recovery_min_seconds=300、recovery_max_seconds=3600。
+- GET /api/proxies/{id}/health-policy：200 返回十进制字符串 proxy_id、revision、auto_recover_enabled、probe_interval_seconds=60、failure_threshold=3、recovery_min_seconds=300、recovery_max_seconds=3600。
 - PUT 同地址：输入 expected_revision、auto_recover_enabled。旧 revision 返回 409 warp_health_revision_conflict 与当前 revision；JSON 安全整数由 HTTP 解码层与 DB CAS 双重校验。
 - POST /api/proxies/{id}/health/recovery：请求体 {}，只调用 ResolveUnknown。409 recovery_busy/recovery_required；成功 200 runtimeProxyDTO。不能接受用户布尔解封。
 - 既有 proxy DTO 增加 warp_health，保留 warp_phase/egress_ip 字段；有效 IP 同样受健康屏障约束。
 
-WarpHealthDTO 只含 proxy_id、revision、auto_recover_enabled、desired_running、state、连续失败/恢复次数、检测/恢复时间、egress_ip、固定 last_error。state：unknown/stopped/disabled/pending/checking/ready/failed/deferred/repairing。只有 DB healthy/enabled/desired，且 runtime 真实 ready、进程在线、IP 校验通过时才给 IP；unknown/failed/deferred/repairing 不给有效 IP。DTO 不暴露材料摘要、claim、Owner、私钥、认证或工具原始错误。
+WarpHealthDTO 只含十进制字符串 proxy_id、revision、auto_recover_enabled、desired_running、state、连续失败/恢复次数、检测/恢复时间、egress_ip、固定 last_error。state：unknown/stopped/disabled/pending/checking/ready/failed/deferred/repairing。只有 DB healthy/enabled/desired，且 runtime 真实 ready、进程在线、IP 校验通过时才给 IP；unknown/failed/deferred/repairing 不给有效 IP。DTO 不暴露材料摘要、claim、Owner、私钥、认证或工具原始错误。所有嵌入 ProxyDTO.id 同样为字符串，旧 numeric 请求输入仍由 HTTP 兼容层精确解析。
 
 ## 本轮独立验证证据
 

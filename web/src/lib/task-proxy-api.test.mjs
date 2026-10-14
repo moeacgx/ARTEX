@@ -11,7 +11,7 @@ test.afterEach(() => {
 for (const mode of ["fixed", "direct", "inherit"]) {
   test(`API客户端载荷 ${mode}：PUT仅发送选择，随后GET回读当前Task`, async () => {
     const calls = [];
-    const expected = { proxy_mode: mode, proxy_id: mode === "fixed" ? 4 : null, expected_revision: 0 };
+    const expected = { proxy_mode: mode, proxy_id: mode === "fixed" ? "4" : null, expected_revision: 0 };
     const current = {
       id: "12",
       status: "paused",

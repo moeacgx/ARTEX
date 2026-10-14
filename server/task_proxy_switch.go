@@ -102,7 +102,7 @@ func (s *Server) registerTaskProxyRoutes(mux *http.ServeMux) {
 
 type taskProxySwitchRequest struct {
 	Mode     db.TaskProxyMode `json:"proxy_mode"`
-	ID       *int64           `json:"proxy_id"`
+	ID       *proxyIDInput    `json:"proxy_id"`
 	Revision json.RawMessage  `json:"expected_revision"`
 	Action   string           `json:"action"`
 }
@@ -125,11 +125,11 @@ func (s *Server) switchTaskProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	revision, err := parseProxyRevision(req.Revision)
-	if err != nil || (req.Mode != "inherit" && req.Mode != "direct" && req.Mode != "fixed") || (req.Mode == "fixed" && (req.ID == nil || *req.ID <= 0)) || (req.Mode != "fixed" && req.ID != nil) {
+	if err != nil || (req.Mode != "inherit" && req.Mode != "direct" && req.Mode != "fixed") || (req.Mode == "fixed" && req.ID == nil) || (req.Mode != "fixed" && req.ID != nil) {
 		writeJSON(w, 400, map[string]any{"error": "需要有效的代理模式和非负安全整数 expected_revision"})
 		return
 	}
-	row, err := s.m.switchTaskProxy(r.Context(), r.PathValue("id"), revision, req.Mode, req.ID)
+	row, err := s.m.switchTaskProxy(r.Context(), r.PathValue("id"), revision, req.Mode, req.ID.Int64())
 	if err != nil {
 		s.writeProxySwitchError(w, r.PathValue("id"), err)
 		return

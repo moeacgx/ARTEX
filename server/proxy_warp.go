@@ -152,7 +152,7 @@ func (s *Server) writeWarpFailure(w http.ResponseWriter, id int64, err error) {
 		code = http.StatusConflict
 	}
 	p, _ := s.m.pg.GetProxy(id)
-	writeJSON(w, code, map[string]any{"error": "WARP 操作失败：" + safeProxyRuntimeError(err), "proxy_id": id, "proxy": s.runtimeProxyDTO(p)})
+	writeJSON(w, code, map[string]any{"error": "WARP 操作失败：" + safeProxyRuntimeError(err), "proxy_id": i64s(id), "proxy": s.runtimeProxyDTO(p)})
 }
 
 func safeProxyRuntimeError(err error) string {

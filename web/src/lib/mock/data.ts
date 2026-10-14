@@ -3125,7 +3125,7 @@ export const llmModelsByProfile: Record<string, LLMModelsResponse> = {
 // 不预置任何 URL/密码，避免示例数据里出现像凭据的东西。
 export const proxies: ProxyRecord[] = [
   {
-    id: 1,
+    id: "1",
     name: "本机 WARP 出口",
     kind: "warp",
     enabled: true,

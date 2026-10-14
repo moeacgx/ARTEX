@@ -27,7 +27,7 @@ var _ WarpHealthRuntime = (*egress.WarpManager)(nil)
 var warpHealthExecutions sync.Map
 
 type WarpHealthDTO struct {
-	ProxyID             int64      `json:"proxy_id"`
+	ProxyID             string     `json:"proxy_id"`
 	DesiredRunning      bool       `json:"desired_running"`
 	AutoRecoverEnabled  bool       `json:"auto_recover_enabled"`
 	Revision            int64      `json:"revision"`
@@ -382,7 +382,7 @@ func (c *WarpHealthController) DTO(ctx context.Context, id int64) (*WarpHealthDT
 		if err != nil {
 			return err
 		}
-		out = &WarpHealthDTO{ProxyID: id, DesiredRunning: s.Desired, AutoRecoverEnabled: s.AutoRecoverEnabled, Revision: s.Revision, State: s.State, ConsecutiveFailures: s.Failures, RecoveryAttempts: s.RecoveryAttempts, LastCheckedAt: s.LastCheckedAt, NextProbeAt: s.NextProbeAt, NextRecoveryAt: s.NextRecoveryAt, LastError: s.LastError}
+		out = &WarpHealthDTO{ProxyID: i64s(id), DesiredRunning: s.Desired, AutoRecoverEnabled: s.AutoRecoverEnabled, Revision: s.Revision, State: s.State, ConsecutiveFailures: s.Failures, RecoveryAttempts: s.RecoveryAttempts, LastCheckedAt: s.LastCheckedAt, NextProbeAt: s.NextProbeAt, NextRecoveryAt: s.NextRecoveryAt, LastError: s.LastError}
 		switch {
 		case pending:
 			out.State = "pending"

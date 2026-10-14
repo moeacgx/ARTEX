@@ -2410,21 +2410,21 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
   // ── proxies（代理中心）──
   // demo 目录里保留一条未注册的 WARP，让"注册需先确认条款"这条交互可被实际操作/截图；
   // register 缺少 accept_terms:true 直接拒绝，与真实后端规则一致。
-  if (path === "/proxies" && m === "GET") return { proxies: mockProxies, global_proxy_id: 1 };
-  if (path === "/proxies" && m === "POST") return { id: Number(b.id) || 1 };
+  if (path === "/proxies" && m === "GET") return { proxies: mockProxies, global_proxy_id: "1" };
+  if (path === "/proxies" && m === "POST") return { id: String(b.id ?? "1") };
   if (path === "/proxies/global" && m === "PUT")
-    return { global_proxy_id: typeof b.proxy_id === "number" ? b.proxy_id : null };
+    return { global_proxy_id: typeof b.proxy_id === "string" || typeof b.proxy_id === "number" ? String(b.proxy_id) : null };
   if (seg[0] === "proxies" && seg[2] === "warp" && seg.length === 4) {
     const action = seg[3];
     if (action === "register" && b.accept_terms !== true) {
       // 契约：后端不接受缺失/false；mock 用同样规则，避免前端漏传也"看起来通过"。
       throw new Error("register: accept_terms must be true");
     }
-    return { id: Number(seg[1]), name: "WARP", kind: "warp", enabled: true, status: "stopped" };
+    return { id: String(seg[1]), name: "WARP", kind: "warp", enabled: true, status: "stopped" };
   }
-  if (seg[0] === "proxies" && seg.length === 3 && m === "DELETE") return { deleted: Number(seg[2]) };
+  if (seg[0] === "proxies" && seg.length === 3 && m === "DELETE") return { deleted: String(seg[2]) };
   if (seg[0] === "proxies" && seg[2] === "test")
-    return { id: Number(seg[1]), name: "代理", kind: "http", enabled: true, status: "healthy" };
+    return { id: String(seg[1]), name: "代理", kind: "http", enabled: true, status: "healthy" };
 
   // ── agents 配置更新 ──
   // 阶段 2：Agent 绑定支持渠道+模型三元组。profile_id 缺省时保留旧绑定；null 解绑；

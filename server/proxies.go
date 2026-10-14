@@ -48,7 +48,7 @@ func (s *Server) listProxies(w http.ResponseWriter, r *http.Request) {
 		out = append(out, s.runtimeProxyDTO(item))
 	}
 	global, _ := s.m.pg.GlobalProxyID()
-	writeJSON(w, 200, map[string]any{"proxies": out, "global_proxy_id": global})
+	writeJSON(w, 200, map[string]any{"proxies": out, "global_proxy_id": proxyIDString(global)})
 }
 
 func (s *Server) createProxy(w http.ResponseWriter, r *http.Request) {
@@ -150,9 +150,9 @@ func (s *Server) createWarpProxy(w http.ResponseWriter, r *http.Request, p *db.P
 		case "succeeded":
 			writeJSON(w, 201, s.runtimeProxyDTO(created))
 		case "failed":
-			writeJSON(w, 502, map[string]any{"error": "WARP 创建未成功；请核对原档案，不要重复注册", "proxy_id": intent.ProxyID, "proxy": s.runtimeProxyDTO(created), "operation_status": "failed"})
+			writeJSON(w, 502, map[string]any{"error": "WARP 创建未成功；请核对原档案，不要重复注册", "proxy_id": i64s(intent.ProxyID), "proxy": s.runtimeProxyDTO(created), "operation_status": "failed"})
 		default:
-			writeJSON(w, 202, map[string]any{"proxy_id": intent.ProxyID, "proxy": proxyDTO(created), "operation_status": "pending"})
+			writeJSON(w, 202, map[string]any{"proxy_id": i64s(intent.ProxyID), "proxy": proxyDTO(created), "operation_status": "pending"})
 		}
 		return
 	}
@@ -161,13 +161,13 @@ func (s *Server) createWarpProxy(w http.ResponseWriter, r *http.Request, p *db.P
 	rt, err := s.m.proxyRuntime()
 	execution, executionErr := s.m.pg.TryWarpHealthExecution(r.Context(), created.ID)
 	if executionErr != nil {
-		writeJSON(w, 409, map[string]any{"error": "WARP 档案执行锁忙，请稍后查询原创建意图", "proxy_id": created.ID, "operation_status": "pending"})
+		writeJSON(w, 409, map[string]any{"error": "WARP 档案执行锁忙，请稍后查询原创建意图", "proxy_id": i64s(created.ID), "operation_status": "pending"})
 		return
 	}
 	claim, claimErr := s.m.pg.BeginWarpHealthCreate(r.Context(), execution, created.ID, s.m.warpHealthRepairGuard)
 	if claimErr != nil {
 		_ = execution.Close()
-		writeJSON(w, 409, map[string]any{"error": "WARP 健康屏障暂不可用，请查询原创建意图", "proxy_id": created.ID, "operation_status": "pending"})
+		writeJSON(w, 409, map[string]any{"error": "WARP 健康屏障暂不可用，请查询原创建意图", "proxy_id": i64s(created.ID), "operation_status": "pending"})
 		return
 	}
 	marked := make(chan struct{})
@@ -205,7 +205,7 @@ func (s *Server) createWarpProxy(w http.ResponseWriter, r *http.Request, p *db.P
 			markWarpActionUnknown(execution, claim)
 		}
 		_ = execution.Close()
-		writeJSON(w, 502, map[string]any{"error": "WARP 创建执行退出未确认；请查询原创建意图", "proxy_id": created.ID, "operation_status": "pending"})
+		writeJSON(w, 502, map[string]any{"error": "WARP 创建执行退出未确认；请查询原创建意图", "proxy_id": i64s(created.ID), "operation_status": "pending"})
 		return
 	}
 	if materialErr != nil {
@@ -224,7 +224,7 @@ func (s *Server) createWarpProxy(w http.ResponseWriter, r *http.Request, p *db.P
 	}
 	_ = execution.Close()
 	if completeErr != nil {
-		writeJSON(w, 502, map[string]any{"error": "WARP 创建结果未能持久化；请核对原档案，不要重新注册", "proxy_id": created.ID, "proxy": proxyDTO(created), "operation_status": "pending"})
+		writeJSON(w, 502, map[string]any{"error": "WARP 创建结果未能持久化；请核对原档案，不要重新注册", "proxy_id": i64s(created.ID), "proxy": proxyDTO(created), "operation_status": "pending"})
 		return
 	}
 	if runtime, runtimeErr := s.m.proxyRuntime(); runtimeErr == nil && runtime.health != nil {
@@ -234,7 +234,7 @@ func (s *Server) createWarpProxy(w http.ResponseWriter, r *http.Request, p *db.P
 		}
 	}
 	if err != nil {
-		writeJSON(w, 502, map[string]any{"error": "WARP 创建未成功；请核对原档案，不要重复注册", "proxy_id": completed.ID, "proxy": s.runtimeProxyDTO(completed), "operation_status": "failed"})
+		writeJSON(w, 502, map[string]any{"error": "WARP 创建未成功；请核对原档案，不要重复注册", "proxy_id": i64s(completed.ID), "proxy": s.runtimeProxyDTO(completed), "operation_status": "failed"})
 		return
 	}
 	writeJSON(w, 201, s.runtimeProxyDTO(completed))
@@ -307,7 +307,7 @@ func (s *Server) deleteProxy(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	writeJSON(w, 200, map[string]any{"deleted": id})
+	writeJSON(w, 200, map[string]any{"deleted": i64s(id)})
 }
 
 // WARP 删除保持独立 session 执行锁直到运行器真实退出，网络清理在事务外执行。
@@ -431,14 +431,15 @@ func (s *Server) testProxy(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) setGlobalProxy(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		ProxyID *int64 `json:"proxy_id"`
+		ProxyID *proxyIDInput `json:"proxy_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, 400, "bad json: "+err.Error())
 		return
 	}
-	if req.ProxyID != nil {
-		p, err := s.m.pg.GetProxy(*req.ProxyID)
+	id := req.ProxyID.Int64()
+	if id != nil {
+		p, err := s.m.pg.GetProxy(*id)
 		if err != nil {
 			writeErr(w, 404, "代理不存在")
 			return
@@ -448,11 +449,11 @@ func (s *Server) setGlobalProxy(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if err := s.m.pg.SetGlobalProxyID(req.ProxyID); err != nil {
+	if err := s.m.pg.SetGlobalProxyID(id); err != nil {
 		writeErr(w, 500, err.Error())
 		return
 	}
-	writeJSON(w, 200, map[string]any{"global_proxy_id": req.ProxyID})
+	writeJSON(w, 200, map[string]any{"global_proxy_id": proxyIDString(id)})
 }
 
 func proxyFromRequest(req proxyRequest) *db.Proxy {

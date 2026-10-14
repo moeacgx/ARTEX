@@ -76,14 +76,15 @@ func TestProxyToolsIntegration(t *testing.T) {
 	s, mux := proxyIntegration(t)
 	pg := s.m.pg
 	// 此测试只删除自己本轮创建的意图和代理。
-	var createdIDs []int64
+	var createdIDs []string
 	var keys []string
 	t.Cleanup(func() {
 		for _, key := range keys {
 			_, _ = pg.Exec(`DELETE FROM proxy_create_intents WHERE item_key=$1`, key)
 		}
 		for _, id := range createdIDs {
-			_, _ = pg.Exec(`DELETE FROM outbound_proxies WHERE id=$1`, id)
+			parsed, _ := strconv.ParseInt(id, 10, 64)
+			_, _ = pg.Exec(`DELETE FROM outbound_proxies WHERE id=$1`, parsed)
 		}
 	})
 	oldResolve, oldAugment := agent.ToolResolve, agent.ToolAugment
@@ -133,6 +134,14 @@ func TestProxyToolsIntegration(t *testing.T) {
 			t.Fatal(err)
 		}
 		return v.Items
+	}
+	id64 := func(raw string) int64 {
+		t.Helper()
+		id, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil {
+			t.Fatalf("工具返回无效代理编号 %q: %v", raw, err)
+		}
+		return id
 	}
 	name := "代理工具-" + uuid.NewString()
 	key1, key2 := uuid.NewString(), uuid.NewString()
@@ -222,7 +231,7 @@ func TestProxyToolsIntegration(t *testing.T) {
 	pid := result[0].Proxy.ID
 	createdIDs = append(createdIDs, pid)
 	for n := 0; n < 2; n++ {
-		checked := decodeItems(call("test_proxies", map[string]any{"proxy_ids": []int64{pid}, "target_url": "http://probe.invalid/check"}))
+		checked := decodeItems(call("test_proxies", map[string]any{"proxy_ids": []int64{id64(pid)}, "target_url": "http://probe.invalid/check"}))
 		if checked[0].OperationStatus != "succeeded" || checked[0].Proxy.Status != "healthy" {
 			t.Fatal("合成代理检测失败")
 		}
@@ -230,7 +239,7 @@ func TestProxyToolsIntegration(t *testing.T) {
 	if hits.Load() != 2 {
 		t.Fatal("没有执行真实代理请求")
 	}
-	row, err := pg.GetProxy(pid)
+	row, err := pg.GetProxy(id64(pid))
 	if err != nil || row.Status != "healthy" || row.LastCheckedAt == nil {
 		t.Fatal("检测状态未落库")
 	}
@@ -249,16 +258,17 @@ func TestProxyToolsIntegration(t *testing.T) {
 	t.Setenv("HTTP_PROXY", proxy.URL)
 	t.Setenv("HTTPS_PROXY", proxy.URL)
 	t.Setenv("ALL_PROXY", proxy.URL)
-	if err := pg.SetGlobalProxyID(&pid); err != nil {
+	pid64 := id64(pid)
+	if err := pg.SetGlobalProxyID(&pid64); err != nil {
 		t.Fatal(err)
 	}
 	defer pg.SetGlobalProxyID(nil)
-	badResult := call("test_proxies", map[string]any{"proxy_ids": []int64{badID}, "target_url": "http://probe.invalid/check", "timeout_seconds": 1})
+	badResult := call("test_proxies", map[string]any{"proxy_ids": []int64{id64(badID)}, "target_url": "http://probe.invalid/check", "timeout_seconds": 1})
 	failed := decodeItems(badResult)
 	if failed[0].ErrorCode != "probe_failed" || failed[0].Proxy.Status != "failed" || hits.Load() != 2 {
 		t.Fatal("坏出口未失败关闭")
 	}
-	row, err = pg.GetProxy(badID)
+	row, err = pg.GetProxy(id64(badID))
 	if err != nil || row.LastError != "代理检测失败" {
 		t.Fatal("错误未安全落库")
 	}
@@ -307,7 +317,7 @@ func TestProxyToolsIntegration(t *testing.T) {
 	}
 	resinID := resinItems[0].Proxy.ID
 	createdIDs = append(createdIDs, resinID)
-	resinProbe := call("test_proxies", map[string]any{"proxy_ids": []int64{resinID}, "target_url": "http://probe.invalid/check"})
+	resinProbe := call("test_proxies", map[string]any{"proxy_ids": []int64{id64(resinID)}, "target_url": "http://probe.invalid/check"})
 	if decodeItems(resinProbe)[0].OperationStatus != "succeeded" || adminHits.Load() != 3 || dataHits.Load() != 1 {
 		t.Fatal("Resin 控制面或数据面未真实检测")
 	}

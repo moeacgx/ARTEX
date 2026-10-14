@@ -267,10 +267,7 @@ func TestProxyPGWarpOneClick(t *testing.T) {
 			if nested, ok := out["proxy"].(map[string]any); ok {
 				row = nested
 			}
-			id, ok := row["id"].(float64)
-			if !ok {
-				t.Fatalf("未保留已建proxy DTO: %d %s", code, raw)
-			}
+			id := proxyResponseID(t, row, "id")
 			t.Cleanup(func() {
 				if rt, err := s.m.proxyRuntime(); err == nil {
 					_, _ = rt.warp.Stop(t.Context(), warpProfileID(int64(id)))
@@ -282,7 +279,7 @@ func TestProxyPGWarpOneClick(t *testing.T) {
 			}
 			path := fmt.Sprintf("/api/proxies/%d", int64(id))
 			if mode != "ready" {
-				if out["proxy_id"] != id || row["warp_phase"] != "failed" || row["status"] != "failed" || row["egress_ip"] != nil || strings.Contains(raw, "synthetic-private-token") {
+				if out["proxy_id"] != i64s(id) || row["warp_phase"] != "failed" || row["status"] != "failed" || row["egress_ip"] != nil || strings.Contains(raw, "synthetic-private-token") {
 					t.Fatalf("失败包泄密或丢失状态: %s", raw)
 				}
 				if mode == "register-fail" {
@@ -314,7 +311,7 @@ func TestProxyPGWarpOneClick(t *testing.T) {
 				found := false
 				for _, v := range listed["proxies"].([]any) {
 					p := v.(map[string]any)
-					if p["id"] == id {
+					if p["id"] == i64s(id) {
 						found = p["egress_ip"] == row["egress_ip"]
 					}
 				}
@@ -426,7 +423,7 @@ func TestProxyPGWarpRuntimeRecovery(t *testing.T) {
 			if code != 201 {
 				t.Fatalf("创建失败: %d %s", code, raw)
 			}
-			id := int64(out["id"].(float64))
+			id := proxyResponseID(t, out, "id")
 			path := fmt.Sprintf("/api/proxies/%d", id)
 			t.Cleanup(func() {
 				if rt, err := s.m.proxyRuntime(); err == nil {
@@ -504,7 +501,7 @@ func TestProxyPGWarpActionSingleConnection(t *testing.T) {
 	if code != 201 {
 		t.Fatalf("创建失败: %d %s", code, raw)
 	}
-	id := int64(out["id"].(float64))
+	id := proxyResponseID(t, out, "id")
 	t.Cleanup(func() {
 		if err := s.m.pg.DeleteProxy(id); err != nil {
 			t.Errorf("清理单连接测试代理: %v", err)
@@ -554,7 +551,7 @@ func TestProxyPGWarpActionSingleConnection(t *testing.T) {
 			if err := json.Unmarshal(data, &dto); err != nil {
 				t.Fatal(err)
 			}
-			if dto.ID != id || (action == "stop" && (dto.Status != "stopped" || dto.EgressIP != "")) || (action == "start" && (dto.Status != "healthy" || dto.EgressIP != "8.8.8.8")) {
+			if dto.ID != i64s(id) || (action == "stop" && (dto.Status != "stopped" || dto.EgressIP != "")) || (action == "start" && (dto.Status != "healthy" || dto.EgressIP != "8.8.8.8")) {
 				t.Fatalf("操作DTO状态错误: %s", data)
 			}
 			if s.m.pg.Stats().WaitCount != before {
@@ -581,7 +578,7 @@ func TestProxyPGWarpChannelDeletePreservesProfile(t *testing.T) {
 	if code != 201 {
 		t.Fatalf("创建失败: %d %s", code, raw)
 	}
-	id := int64(out["id"].(float64))
+	id := proxyResponseID(t, out, "id")
 	path := fmt.Sprintf("/api/proxies/%d", id)
 	t.Cleanup(func() {
 		if rt, err := s.m.proxyRuntime(); err == nil {
@@ -619,7 +616,7 @@ func TestProxyPGWarpChannelDeletePreservesProfile(t *testing.T) {
 	}
 	for _, action := range []string{"start", "recover"} {
 		code, out, raw = proxyAPI(t, mux, "POST", path+"/warp/"+action, "")
-		if code != 200 || out["id"] != float64(id) || out["egress_ip"] != "8.8.8.8" {
+		if code != 200 || out["id"] != i64s(id) || out["egress_ip"] != "8.8.8.8" {
 			t.Fatalf("解绑后原ID不能恢复: %s %d %s", action, code, raw)
 		}
 	}
@@ -655,7 +652,7 @@ func TestProxyPGWarpDeleteRunning(t *testing.T) {
 	if code != 201 {
 		t.Fatalf("创建失败: %d %s", code, raw)
 	}
-	id := int64(out["id"].(float64))
+	id := proxyResponseID(t, out, "id")
 	path := fmt.Sprintf("/api/proxies/%d", id)
 	rt, err := s.m.proxyRuntime()
 	if err != nil {

@@ -311,7 +311,7 @@ export const api = {
       proxy_mode: input.proxyMode ?? "inherit",
       proxy_id: input.proxyId ?? null,
     }),
-  proxies: () => get<{ proxies: import("./types").ProxyRecord[]; global_proxy_id: number | null }>("/proxies"),
+  proxies: () => get<{ proxies: import("./types").ProxyRecord[]; global_proxy_id: string | null }>("/proxies"),
   createProxy: (input: ProxyWriteInput, idempotencyKey?: string) => {
     if (input.kind === "warp" && (!idempotencyKey || !WARP_IDEMPOTENCY_KEY.test(idempotencyKey))) {
       throw new Error("新增 WARP 必须使用已保存的请求编号");
@@ -327,21 +327,21 @@ export const api = {
       true,
     );
   },
-  proxy: (id: number) => get<ProxyRecord>(`/proxies/${id}`),
-  updateProxy: (id: number, input: ProxyWriteInput) => put<ProxyRecord>(`/proxies/${id}`, input),
-  deleteProxy: (id: number) => del<{ deleted: number }>(`/proxies/${id}`),
-  testProxy: (id: number) => post<ProxyRecord>(`/proxies/${id}/test`),
-  setGlobalProxy: (proxyId: number | null) =>
-    put<{ global_proxy_id: number | null }>("/proxies/global", { proxy_id: proxyId }),
+  proxy: (id: string) => get<ProxyRecord>(`/proxies/${encodeURIComponent(id)}`),
+  updateProxy: (id: string, input: ProxyWriteInput) => put<ProxyRecord>(`/proxies/${encodeURIComponent(id)}`, input),
+  deleteProxy: (id: string) => del<{ deleted: string }>(`/proxies/${encodeURIComponent(id)}`),
+  testProxy: (id: string) => post<ProxyRecord>(`/proxies/${encodeURIComponent(id)}/test`),
+  setGlobalProxy: (proxyId: string | null) =>
+    put<{ global_proxy_id: string | null }>("/proxies/global", { proxy_id: proxyId }),
   // 注册必须先取得产品用户对注册使用条款的明确同意：确认后固定携带
   // {accept_terms:true}，未确认时调用方不得发起该请求（后端不接受缺失/false）。
   // start/stop/recover 不涉及条款，不带请求体。
-  proxyWarpAction: (id: number, action: "start" | "stop" | "register" | "recover", acceptTerms?: true) =>
+  proxyWarpAction: (id: string, action: "start" | "stop" | "register" | "recover", acceptTerms?: true) =>
     post<ProxyRecord>(
-      `/proxies/${id}/warp/${action}`,
+      `/proxies/${encodeURIComponent(id)}/warp/${action}`,
       action === "register" ? { accept_terms: acceptTerms === true } : undefined,
     ),
-  releaseResin: (id: number) => post<ProxyRecord>(`/proxies/${id}/resin/release`),
+  releaseResin: (id: string) => post<ProxyRecord>(`/proxies/${encodeURIComponent(id)}/resin/release`),
   taskCategories: () => get<{ categories: TaskCategory[] }>("/task-categories").then((r) => arr(r.categories)),
   updateTask: (id: string, input: { name?: string; pinned?: boolean }) => patch<Task>(`/tasks/${id}`, input),
   renameTask: (id: string, name: string) => patch<Task>(`/tasks/${id}`, { name }),

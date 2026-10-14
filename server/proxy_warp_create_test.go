@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 
 	"github.com/Autumn-27/artex/db"
@@ -17,8 +18,12 @@ func TestProxyPGWarpTermsBeforeCreation(t *testing.T) {
 	}
 	for _, body := range []string{`{"name":"条款未确认","kind":"warp"}`, `{"name":"条款未确认","kind":"warp","accept_terms":false}`} {
 		code, out, raw := proxyAPI(t, mux, "POST", "/api/proxies", body)
-		if id, ok := out["id"].(float64); ok {
-			t.Cleanup(func() { _, _ = s.m.pg.Exec(`DELETE FROM outbound_proxies WHERE id=$1`, int64(id)) })
+		if rawID, ok := out["id"].(string); ok {
+			id, err := strconv.ParseInt(rawID, 10, 64)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _, _ = s.m.pg.Exec(`DELETE FROM outbound_proxies WHERE id=$1`, id) })
 		}
 		if code != 400 {
 			t.Errorf("未确认条款仍建档: %d %s", code, raw)

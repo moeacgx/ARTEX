@@ -50,16 +50,16 @@ export function taskProxyError(input: {
   loading: boolean;
   error: string;
   mode: TaskProxyMode;
-  id?: number;
-  globalID: number | null;
+  id?: string;
+  globalID: string | null;
   items: ProxyRecord[];
 }): string {
   if (input.loading) return "代理目录仍在加载，请稍候";
   if (input.error) return "代理目录加载失败，重试成功后才能创建任务";
-  let id: number | null | undefined = null;
+  let id: string | null | undefined = null;
   if (input.mode === "fixed") id = input.id;
   if (input.mode === "inherit") id = input.globalID;
-  if (input.mode === "fixed" && !id) return "请选择代理编号";
+  if (input.mode === "fixed" && (!id || !Number.isSafeInteger(Number(id)))) return "请选择可由历史任务接口精确表示的代理编号";
   if (id !== null && id !== undefined) {
     const proxy = input.items.find((item) => item.id === id);
     if (!proxy || !proxySelectable(proxy)) return `代理 #${id} 已不可用，请修复或重新选择`;
@@ -138,7 +138,7 @@ export function warpReady(item: ProxyRecord): boolean {
       item.kind === "warp" &&
       item.enabled &&
       item.status === "healthy" &&
-      health.proxy_id === Number(item.id) &&
+      health.proxy_id === item.id &&
       health.desired_running &&
       health.state === "ready" &&
       !!health.egress_ip?.trim() &&
@@ -181,7 +181,7 @@ export const WARP_PHASE_LABEL: Record<string, string> = {
 export function proxyFromFailure(error: unknown): ProxyRecord | null {
   const payload = (error as { payload?: { proxy_id?: unknown; proxy?: ProxyRecord } })?.payload;
   const item = payload?.proxy;
-  return item && Number.isInteger(item.id) && item.id > 0 && payload?.proxy_id === item.id ? item : null;
+  return item && /^[1-9]\d*$/.test(item.id) && payload?.proxy_id === item.id ? item : null;
 }
 
 // warpRegisterBody：注册前必须已由用户勾选确认；未确认时返回 null，调用方【不得】

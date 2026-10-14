@@ -3091,11 +3091,11 @@ function CreateTaskSheet({
   const [sourceTaskIDs, setSourceTaskIDs] = React.useState<string[]>([]);
   const [companyIDs, setCompanyIDs] = React.useState<number[]>([]);
   const [proxies, setProxies] = React.useState<ProxyRecord[]>([]);
-  const [globalProxyID, setGlobalProxyID] = React.useState<number | null>(null);
+  const [globalProxyID, setGlobalProxyID] = React.useState<string | null>(null);
   const [proxyCatalogLoading, setProxyCatalogLoading] = React.useState(true);
   const [proxyCatalogError, setProxyCatalogError] = React.useState("");
   const [proxyMode, setProxyMode] = React.useState<"inherit" | "direct" | "fixed">("inherit");
-  const [proxyID, setProxyID] = React.useState<number | undefined>(undefined);
+  const [proxyID, setProxyID] = React.useState<string | undefined>(undefined);
   const [creating, setCreating] = React.useState(false);
   const [timeoutMin, setTimeoutMin] = React.useState(""); // 任务级超时(分钟);空/0 = 不限时
   const [heartbeatMin, setHeartbeatMin] = React.useState("10"); // planner 心跳(分钟);默认10,下限10(与后端一致)
@@ -3222,7 +3222,7 @@ function CreateTaskSheet({
           .map((r) => ({ ...r, pattern: r.pattern.trim() }))
           .filter((r) => r.pattern !== ""),
         proxyMode,
-        proxyId: proxyMode === "fixed" ? proxyID : undefined,
+        proxyId: proxyMode === "fixed" ? Number(proxyID) : undefined,
       });
       toast.success("任务已创建");
       setName("");
@@ -3431,7 +3431,7 @@ function CreateTaskSheet({
                     return;
                   }
                   setProxyMode("fixed");
-                  setProxyID(Number(value.slice("fixed:".length)));
+                  setProxyID(value.slice("fixed:".length));
                 }}
               >
                 <option value="inherit">继承全局默认代理</option>

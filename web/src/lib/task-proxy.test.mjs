@@ -10,21 +10,21 @@ import {
 import assert from "node:assert/strict";
 import test from "node:test";
 
-const item = (extra = {}) => ({ id: 4, name: "出口四", kind: "http", enabled: true, status: "healthy", ...extra });
+const item = (extra = {}) => ({ id: "4", name: "出口四", kind: "http", enabled: true, status: "healthy", ...extra });
 const task = (extra = {}) => ({
   id: "12",
   status: "paused",
   proxy_mode: "inherit",
   proxy_revision: 0,
   proxy_id: 2,
-  proxy: { id: 2, name: "旧快照", kind: "http" },
+  proxy: { id: "2", name: "旧快照", kind: "http" },
   ...extra,
 });
 const selection = (extra = {}) => ({
   task: task(),
   draft: { mode: "fixed", id: "4" },
   items: [item()],
-  globalID: 4,
+  globalID: "4",
   loading: false,
   error: "",
   ...extra,
@@ -40,7 +40,7 @@ test("回填保留原 inherit 快照，不将它改为 fixed 或当前默认；�
   assert.equal(taskProxyDraft(task({ proxy_mode: undefined })).mode, "");
 });
 
-test("切换三模式只发模式/数字ID；非法ID/未知模式拒绝，不带快照和凭据", () => {
+test("切换三模式只发模式/字符串ID；数字历史载荷仍由服务端兼容", () => {
   assert.deepEqual(taskProxyInput({ mode: "inherit", id: "2" }, 0), {
     proxy_mode: "inherit",
     proxy_id: null,
@@ -53,10 +53,11 @@ test("切换三模式只发模式/数字ID；非法ID/未知模式拒绝，不�
   });
   assert.deepEqual(taskProxyInput({ mode: "fixed", id: "4" }, 0), {
     proxy_mode: "fixed",
-    proxy_id: 4,
+    proxy_id: "4",
     expected_revision: 0,
   });
-  for (const id of ["", "0", "-1", "1e3", "1.5", "9007199254740993"])
+  assert.equal(taskProxyInput({ mode: "fixed", id: "9007199254740993" }, 0).proxy_id, "9007199254740993");
+  for (const id of ["", "0", "-1", "1e3", "1.5"])
     assert.throws(() => taskProxyInput({ mode: "fixed", id }, 0));
   assert.throws(() => taskProxyInput({ mode: "", id: "" }, 0));
 });
@@ -164,7 +165,7 @@ test("409不重试不GET；500/网络未知只允许核对GET，选择由调用�
     assert.equal(writes, 1);
     assert.equal(reads, 0);
     assert.equal(flow.needsReadback, status !== 409);
-    assert.deepEqual(input, { proxy_mode: "fixed", proxy_id: 4, expected_revision: 0 });
+    assert.deepEqual(input, { proxy_mode: "fixed", proxy_id: "4", expected_revision: 0 });
   }
 });
 

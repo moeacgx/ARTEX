@@ -59,7 +59,7 @@ export function WarpHealthControl({
     const current = ++sequence.current;
     setLoading(true);
     try {
-      const value = await adapter.policy(Number(proxy.id));
+      const value = await adapter.policy(proxy.id);
       if (!mounted.current || current !== sequence.current) return;
       setPolicy(value);
       if (initialize && !submission.reviewRequired && !submission.needsReadback) {
@@ -93,9 +93,9 @@ export function WarpHealthControl({
     try {
       const value = await submission.submit(
         async () => {
-          await adapter.save(Number(proxy.id), expected, draft);
+          await adapter.save(proxy.id, expected, draft);
         },
-        () => adapter.policy(Number(proxy.id)),
+        () => adapter.policy(proxy.id),
         (result) => result.revision > expected && result.auto_recover_enabled === draft,
       );
       if (!mounted.current || current !== sequence.current || !value) return;
@@ -120,7 +120,7 @@ export function WarpHealthControl({
     const current = sequence.current;
     setSaving(true);
     try {
-      const value = await submission.reconcile(() => adapter.policy(Number(proxy.id)));
+      const value = await submission.reconcile(() => adapter.policy(proxy.id));
       if (!mounted.current || current !== sequence.current || !value) return;
       setPolicy(value);
       setError(`已核对当前健康策略版本 ${value.revision}。草稿保留，请明确采用当前版本。`);
@@ -147,11 +147,11 @@ export function WarpHealthControl({
         // 提交前即封住重发；断网与迟到结果均只回读原档案。
         recoverySubmitted.current = true;
         setRecoveryReadback(true);
-        await adapter.recover(Number(proxy.id));
+        await adapter.recover(proxy.id);
       }
-      const value = await adapter.proxy(Number(proxy.id));
+      const value = await adapter.proxy(proxy.id);
       if (!mounted.current || current !== sequence.current) return;
-      if (Number(value.id) !== Number(proxy.id)) throw new Error("恢复回读编号不一致");
+      if (value.id !== proxy.id) throw new Error("恢复回读编号不一致");
       onUpdated(value);
       setError("已回读原出口运行状态。若仍待人工恢复，请核对服务端退出与空闲检查；不会重复提交恢复。");
     } catch (failure) {
