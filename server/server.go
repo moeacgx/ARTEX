@@ -1157,33 +1157,41 @@ func (s *Server) listTasks(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 503, "任务代理状态暂不可读取")
 		return
 	}
-	metrics, _ := s.m.PG().TaskListMetricsAll()
+	metrics, err := s.m.PG().TaskListMetricsAll()
+	if err != nil {
+		writeErr(w, 503, "任务统计暂不可读取")
+		return
+	}
 	archiveBlockers, _ := s.m.PG().TaskArchiveBlockers()
 	dtos := make([]TaskDTO, 0, len(list))
 	for _, t := range list {
 		n, _ := strconv.ParseInt(t.ID, 10, 64)
 		dto := taskDTO(t, s.resolvedTaskStatus(t), proxyStates[n])
 		applyTaskArchiveBlocker(&dto, archiveBlockers)
-		metric := metrics[t.ExpID]
-		dto.Tokens = tokenTotalDTO(metric.Tokens)
-		// prefer the live in-memory heartbeat (fresher) and fall back to the
-		// persisted max activity time (survives restarts) for run-duration display.
-		dto.LastActivity = metric.LastActivity
-		if live := s.engine.LastActivity(t.ID); live > dto.LastActivity {
-			dto.LastActivity = live
-		}
-		dto.GoalsTotal = metric.Goals.Total
-		dto.GoalsMet = metric.Goals.Met
-		dto.InFlight = metric.RunningIntents
-		dto.Findings = FindingSeverityDTO{
-			Critical: metric.Findings.Critical,
-			High:     metric.Findings.High,
-			Medium:   metric.Findings.Medium,
-			Low:      metric.Findings.Low,
-		}
+		s.applyTaskMetrics(&dto, t, metrics[t.ExpID])
 		dtos = append(dtos, dto)
 	}
 	writeJSON(w, 200, map[string]any{"tasks": dtos, "active": active})
+}
+
+func (s *Server) applyTaskMetrics(dto *TaskDTO, t *Task, metric db.TaskListMetrics) {
+	dto.Tokens = tokenTotalDTO(metric.Tokens)
+	// 详情和列表共用统计，持久活动时间可跨重启，内存心跳只取较新值。
+	dto.LastActivity = metric.LastActivity
+	if s.engine != nil {
+		if live := s.engine.LastActivity(t.ID); live > dto.LastActivity {
+			dto.LastActivity = live
+		}
+	}
+	dto.GoalsTotal = metric.Goals.Total
+	dto.GoalsMet = metric.Goals.Met
+	dto.InFlight = metric.RunningIntents
+	dto.Findings = FindingSeverityDTO{
+		Critical: metric.Findings.Critical,
+		High:     metric.Findings.High,
+		Medium:   metric.Findings.Medium,
+		Low:      metric.Findings.Low,
+	}
 }
 
 func (s *Server) resolvedTaskStatus(t *Task) string {
@@ -1934,6 +1942,16 @@ func (s *Server) getTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	dto := taskDTO(t, s.resolvedTaskStatus(t), db.TaskProxyState{Mode: row.ProxyMode, ID: row.ProxyID, Snapshot: row.ProxySnapshot, Revision: row.ProxyRevision})
+	metric, err := s.m.pg.TaskMetrics(n)
+	if errors.Is(err, sql.ErrNoRows) {
+		writeErr(w, 404, "task not found")
+		return
+	}
+	if err != nil {
+		writeErr(w, 503, "任务统计暂不可读取")
+		return
+	}
+	s.applyTaskMetrics(&dto, t, metric)
 	archiveBlockers, _ := s.m.PG().TaskArchiveBlockers()
 	applyTaskArchiveBlocker(&dto, archiveBlockers)
 	writeJSON(w, 200, dto)

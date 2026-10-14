@@ -2,6 +2,8 @@ package server
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log"
 	"strconv"
 	"sync"
@@ -42,7 +44,7 @@ type taskProxyTicket struct {
 }
 
 func (e *Engine) beginTaskOperationContext(ctx context.Context, id string) (context.Context, func(), bool) {
-	if ctx == nil || ctx.Err() != nil || !e.beginTaskOperation(id) {
+	if ctx == nil || e.beginTaskOperationError(ctx, id) != nil {
 		return ctx, func() {}, false
 	}
 	ticket := &taskProxyTicket{manager: e.m, taskID: id, ctx: ctx}
@@ -108,7 +110,7 @@ func (m *Manager) ReleaseTaskProxyWhenIdle(ctx context.Context, t *Task) error {
 	return m.releaseTaskProxyOccupied(ctx, t)
 }
 
-func (m *Manager) releaseTaskProxyOccupied(ctx context.Context, t *Task) error {
+func (m *Manager) releaseTaskProxyOccupied(ctx context.Context, t *Task) (resultErr error) {
 	id, err := strconv.ParseInt(t.ID, 10, 64)
 	if err != nil {
 		return err
@@ -124,7 +126,8 @@ func (m *Manager) releaseTaskProxyOccupied(ctx context.Context, t *Task) error {
 		}
 		defer func() {
 			if err := executor.ReleaseTaskProxyActivity(); err != nil {
-				log.Printf("[proxy] 回收占用解除失败: %v", err)
+				// 锁连接已丢失时不能换连接盲目清引用；保留占用交正式恢复。
+				resultErr = errors.Join(resultErr, db.ErrProxySwitchRecovery, fmt.Errorf("任务 %s 回收占用解除失败: %w", t.ID, err))
 			}
 		}()
 	}

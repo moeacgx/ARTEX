@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"strconv"
@@ -48,39 +49,73 @@ func (e *Engine) inflightCounter(taskID string) *int64 {
 // has already installed its barrier. The delete handler can therefore wait for
 // inflight==0 without a check-then-start race recreating files after cleanup.
 func (e *Engine) beginTaskOperation(taskID string) bool {
+	return e.beginTaskOperationError(context.Background(), taskID) == nil
+}
+
+// 保留底层原因供继续任务使用；布尔兼容入口不能把代理占用误报成删除。
+type taskOperationAdmissionError struct{ cause error }
+
+func (e taskOperationAdmissionError) Unwrap() error { return e.cause }
+func (e taskOperationAdmissionError) Error() string {
+	switch {
+	case errors.Is(e.cause, db.ErrProxyInUse):
+		return "任务代理出口被活动操作或回收占用；请等待退出，异常中断后通过代理恢复入口核对"
+	case errors.Is(e.cause, db.ErrProxySwitchRecovery):
+		return "任务代理状态需要人工恢复，请通过代理恢复入口核对"
+	case errors.Is(e.cause, db.ErrProxyUnavailable):
+		return "任务代理不可用，请检查代理健康状态"
+	default:
+		return "任务操作准入失败，请稍后重试或检查服务日志"
+	}
+}
+
+func (e *Engine) beginTaskOperationError(ctx context.Context, taskID string) error {
 	b := e.proxyBarrier(taskID)
 	b.mu.Lock()
 	for b.releasing {
 		changed := b.changed
 		b.mu.Unlock()
-		<-changed
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-changed:
+		}
 		b.mu.Lock()
 	}
 	defer b.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	e.deleteMu.RLock()
 	defer e.deleteMu.RUnlock()
 	if e.IsDeleting(taskID) {
-		return false
+		return errors.New("task is being deleted")
 	}
 	if e.m != nil && e.m.pg != nil {
 		id, err := strconv.ParseInt(taskID, 10, 64)
 		if err != nil {
-			return false
+			return taskOperationAdmissionError{cause: err}
 		}
 		state, err := e.m.pg.AcquireTaskOperation(id)
 		if err != nil {
 			log.Printf("[proxy] 任务 %s 操作准入失败: %v", taskID, err)
-			return false
+			return taskOperationAdmissionError{cause: err}
 		}
 		if task, ok := e.m.Task(taskID); ok {
 			if err = e.m.refreshTaskProxyState(task, state); err != nil {
 				_ = e.m.pg.ReleaseTaskOperation(id)
-				return false
+				return taskOperationAdmissionError{cause: err}
 			}
+		}
+		if err := ctx.Err(); err != nil {
+			if releaseErr := e.m.pg.ReleaseTaskOperation(id); releaseErr != nil {
+				log.Printf("[proxy] 任务 %s 已取消准入的占用解除失败: %v", taskID, releaseErr)
+			}
+			return err
 		}
 	}
 	atomic.AddInt64(e.inflightCounter(taskID), 1)
-	return true
+	return nil
 }
 
 func (e *Engine) decInflight(taskID string) {

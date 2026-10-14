@@ -123,8 +123,8 @@ func (s *Server) admitTaskWhen(t *Task, mode string, requirePaused bool) (queued
 	if !exists || current != t || s.engine.IsDeleting(t.ID) {
 		return false, fmt.Errorf("task is being deleted")
 	}
-	if !s.engine.beginTaskOperation(t.ID) {
-		return false, fmt.Errorf("task is being deleted")
+	if err := s.engine.beginTaskOperationError(context.Background(), t.ID); err != nil {
+		return false, err
 	}
 	defer s.engine.decInflight(t.ID)
 	lifecycle := t.lifecycleSnapshot()

@@ -1344,7 +1344,26 @@ type TaskListMetrics struct {
 // The lateral lookups use the per-exploration indexes instead of grouping the
 // complete activity history on every poll.
 func (d *DB) TaskListMetricsAll() (map[int64]TaskListMetrics, error) {
-	rows, err := d.Query(`
+	return d.taskListMetrics(0)
+}
+
+// TaskMetrics 只聚合指定任务，详情轮询不扫描其他任务的活动历史。
+func (d *DB) TaskMetrics(taskID int64) (TaskListMetrics, error) {
+	if taskID <= 0 {
+		return TaskListMetrics{}, sql.ErrNoRows
+	}
+	all, err := d.taskListMetrics(taskID)
+	if err != nil {
+		return TaskListMetrics{}, err
+	}
+	for _, metric := range all {
+		return metric, nil
+	}
+	return TaskListMetrics{}, sql.ErrNoRows
+}
+
+func (d *DB) taskListMetrics(taskID int64) (map[int64]TaskListMetrics, error) {
+	query := `
 		SELECT task.exploration_id,
 		       COALESCE(token_metrics.input_tokens,0),
 		       COALESCE(token_metrics.output_tokens,0),
@@ -1393,7 +1412,13 @@ func (d *DB) TaskListMetricsAll() (map[int64]TaskListMetrics, error) {
 			FROM findings
 			WHERE task_id=task.id
 		) finding_metrics ON true
-		WHERE task.deleted_at IS NULL`)
+		WHERE task.deleted_at IS NULL`
+	var args []any
+	if taskID > 0 {
+		query += ` AND task.id=$1`
+		args = append(args, taskID)
+	}
+	rows, err := d.Query(query, args...)
 	if err != nil {
 		return nil, err
 	}
