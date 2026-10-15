@@ -27,14 +27,15 @@ type goalSpec struct {
 //
 // 异步(goroutine)所以调用方立即返回,两条路径行为一致:秒建任务、后台拆目标。
 func (s *Server) launchTask(t *Task, seedText string, seedFirstIntent bool) {
-	if !s.engine.beginTaskOperation(t.ID) {
+	finish, ok := s.engine.beginTaskOperationFinish(t.ID)
+	if !ok {
 		return
 	}
 	s.seed(t, seedText)
 	if seedFirstIntent {
 		s.seedFirstIntent(t)
 	}
-	s.engine.decInflight(t.ID)
+	finish()
 	if _, err := s.admitTask(t, "bootstrap"); err != nil {
 		log.Printf("[concurrency] task %s 启动失败: %v", t.ID, err)
 	}
@@ -129,10 +130,11 @@ func (s *Server) admitTaskWhen(t *Task, mode string, requirePaused bool) (queued
 			return false, err
 		}
 	}
-	if err := s.engine.beginTaskOperationError(context.Background(), t.ID); err != nil {
+	finish, err := s.engine.beginTaskOperationFinishError(t.ID)
+	if err != nil {
 		return false, err
 	}
-	defer s.engine.decInflight(t.ID)
+	defer finish()
 	lifecycle := t.lifecycleSnapshot()
 	if requirePaused {
 		if isTerminalStatus(lifecycle.Status) {
@@ -240,7 +242,8 @@ func (s *Server) hasReadyQueuedTask(excludeID string) bool {
 
 func (s *Server) startAdmittedTask(t *Task, mode string) {
 	if mode == "bootstrap" {
-		if !s.engine.beginTaskOperation(t.ID) {
+		finish, ok := s.engine.beginTaskOperationFinish(t.ID)
+		if !ok {
 			return
 		}
 		// A first-run task may have kept the Engine pause barrier while waiting
@@ -251,7 +254,7 @@ func (s *Server) startAdmittedTask(t *Task, mode string) {
 			s.engine.Resume(t)
 		}
 		go func() {
-			defer s.engine.decInflight(t.ID)
+			defer finish()
 			s.startTaskEngine(t)
 		}()
 		return
@@ -347,15 +350,16 @@ func (s *Server) reconcileConcurrency() {
 		if mode != "bootstrap" {
 			mode = "resume"
 		}
-		if !s.engine.beginTaskOperation(task.ID) {
+		finish, ok := s.engine.beginTaskOperationFinish(task.ID)
+		if !ok {
 			continue
 		}
 		if err := s.m.ApplyTaskAdmission(task.ID, lifecycle.Status, lifecycle.Status, false, mode, false); err != nil {
-			s.engine.decInflight(task.ID)
+			finish()
 			continue
 		}
 		s.startAdmittedTask(task, mode)
-		s.engine.decInflight(task.ID)
+		finish()
 		slots--
 	}
 }

@@ -52,6 +52,21 @@ func (e *Engine) beginTaskOperation(taskID string) bool {
 	return e.beginTaskOperationError(context.Background(), taskID) == nil
 }
 
+// beginTaskOperationFinish 返回与本次准入一一对应的释放闭包；正式业务路径
+// 必须使用它，避免匿名释放按创建时间误删另一条真实操作 token。
+func (e *Engine) beginTaskOperationFinish(taskID string) (func(), bool) {
+	finish, err := e.beginTaskOperationFinishError(taskID)
+	return finish, err == nil
+}
+
+func (e *Engine) beginTaskOperationFinishError(taskID string) (func(), error) {
+	var state db.TaskProxyState
+	if err := e.beginTaskOperationState(context.Background(), taskID, &state); err != nil {
+		return func() {}, taskOperationAdmissionError{cause: err}
+	}
+	return func() { e.decInflightToken(taskID, state.OperationToken) }, nil
+}
+
 // 保留底层原因供继续任务使用；布尔兼容入口不能把代理占用误报成删除。
 type taskOperationAdmissionError struct{ cause error }
 
@@ -299,10 +314,11 @@ func (e *Engine) settleTask(ctx context.Context, t *Task) {
 
 	// ⑤ 终局一轮 planner(任务超时词,最后目标判定,不产新意图)。
 	met := e.runFinalPlannerRound(ctx, t)
-	if !e.beginTaskOperation(t.ID) {
+	finishOperation, ok := e.beginTaskOperationFinish(t.ID)
+	if !ok {
 		return
 	}
-	defer e.decInflight(t.ID)
+	defer finishOperation()
 
 	// ⑥ 定终态(带守卫):met → done(completed);否则 timeout。若常规路径已先落 done,
 	// 守卫(SetTaskStatusGuarded)会拒绝覆盖,保留 completed 语义。

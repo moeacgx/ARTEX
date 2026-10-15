@@ -1283,11 +1283,12 @@ func (s *Server) controlIntent(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 404, "task not found")
 		return
 	}
-	if !s.engine.beginTaskOperation(t.ID) {
+	finish, ok := s.engine.beginTaskOperationFinish(t.ID)
+	if !ok {
 		writeErr(w, 409, "任务正在删除，无法控制意图")
 		return
 	}
-	defer s.engine.decInflight(t.ID)
+	defer finish()
 
 	iid, err := strconv.ParseInt(r.PathValue("iid"), 10, 64)
 	if err != nil || iid <= 0 {
@@ -1340,11 +1341,12 @@ func (s *Server) rerunIntent(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "bad intent id")
 		return
 	}
-	if !s.engine.beginTaskOperation(t.ID) {
+	finish, ok := s.engine.beginTaskOperationFinish(t.ID)
+	if !ok {
 		writeErr(w, 409, "任务正在删除，无法重跑意图")
 		return
 	}
-	defer s.engine.decInflight(t.ID)
+	defer finish()
 	before, err := t.Store.GetNode(iid)
 	if err != nil {
 		writeErr(w, 500, err.Error())
@@ -1379,11 +1381,12 @@ func (s *Server) rerunBlocked(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 404, "task not found")
 		return
 	}
-	if !s.engine.beginTaskOperation(t.ID) {
+	finish, ok := s.engine.beginTaskOperationFinish(t.ID)
+	if !ok {
 		writeErr(w, 409, "任务正在删除，无法重跑意图")
 		return
 	}
-	defer s.engine.decInflight(t.ID)
+	defer finish()
 	intents, err := t.Store.ListByKind(db.KindIntent, 1000000)
 	if err != nil {
 		writeErr(w, 500, err.Error())

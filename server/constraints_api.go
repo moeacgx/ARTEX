@@ -52,11 +52,12 @@ func (s *Server) addConstraint(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 404, "task not found")
 		return
 	}
-	if !s.engine.beginTaskOperation(t.ID) {
+	finish, ok := s.engine.beginTaskOperationFinish(t.ID)
+	if !ok {
 		writeErr(w, 409, "任务正在删除,无法新增约束")
 		return
 	}
-	defer s.engine.decInflight(t.ID)
+	defer finish()
 
 	var body struct {
 		Text string `json:"text"`
@@ -91,11 +92,12 @@ func (s *Server) editConstraint(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 404, "task not found")
 		return
 	}
-	if !s.engine.beginTaskOperation(t.ID) {
+	finish, ok := s.engine.beginTaskOperationFinish(t.ID)
+	if !ok {
 		writeErr(w, 409, "任务正在删除,无法修改约束")
 		return
 	}
-	defer s.engine.decInflight(t.ID)
+	defer finish()
 
 	cid, err := strconv.ParseInt(r.PathValue("cid"), 10, 64)
 	if err != nil || cid <= 0 {
@@ -134,11 +136,12 @@ func (s *Server) deleteConstraint(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 404, "task not found")
 		return
 	}
-	if !s.engine.beginTaskOperation(t.ID) {
+	finish, ok := s.engine.beginTaskOperationFinish(t.ID)
+	if !ok {
 		writeErr(w, 409, "任务正在删除,无法删除约束")
 		return
 	}
-	defer s.engine.decInflight(t.ID)
+	defer finish()
 
 	cid, err := strconv.ParseInt(r.PathValue("cid"), 10, 64)
 	if err != nil || cid <= 0 {

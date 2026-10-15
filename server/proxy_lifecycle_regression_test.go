@@ -16,6 +16,60 @@ import (
 	"github.com/Autumn-27/artex/db"
 )
 
+func TestProxyPGReadyForDoesNotStealTaskOperationTokens(t *testing.T) {
+	s, _ := proxyIntegration(t)
+	task := createRuntimeTask(t, s, db.TaskProxyModeDirect, nil)
+	s.m.tasks = map[string]*Task{task.ID: task}
+	s.engine = NewEngine(s.m)
+	s.engine.SetAuthoritativeAgentResolver(func(*Task) (*agent.Planner, *agent.Worker) {
+		return &agent.Planner{}, &agent.Worker{}
+	})
+	id := switchTaskID(t, task)
+	first, err := s.m.pg.AcquireTaskOperation(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := s.m.pg.AcquireTaskOperation(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	third, err := s.m.pg.AcquireTaskOperation(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 4; i++ {
+		if !s.engine.ReadyFor(task) {
+			t.Fatal("任务应保持可运行")
+		}
+	}
+	var tokens []string
+	rows, err := s.m.pg.Query(`SELECT token FROM proxy_subject_activity a JOIN proxy_subject_policies p ON p.id=a.policy_id WHERE p.task_id=$1 AND a.kind='task' ORDER BY a.created_at,a.token`, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for rows.Next() {
+		var token string
+		if err := rows.Scan(&token); err != nil {
+			rows.Close()
+			t.Fatal(err)
+		}
+		tokens = append(tokens, token)
+	}
+	rows.Close()
+	if len(tokens) != 3 || tokens[0] != first.OperationToken || tokens[1] != second.OperationToken || tokens[2] != third.OperationToken {
+		t.Fatalf("readiness 轮询改变了活动 token: got=%v want=%v,%v,%v", tokens, first.OperationToken, second.OperationToken, third.OperationToken)
+	}
+	for _, token := range []string{first.OperationToken, second.OperationToken, third.OperationToken} {
+		if err := s.m.pg.ReleaseTaskOperationToken(id, token); err != nil {
+			t.Fatalf("释放原 token 失败: %v", err)
+		}
+	}
+	var count int
+	if err := s.m.pg.QueryRow(`SELECT COALESCE(active_count,0) FROM task_operation_activity WHERE task_id=$1`, id).Scan(&count); err == nil && count != 0 {
+		t.Fatalf("精确释放后 active_count=%d", count)
+	}
+}
+
 type proxyActivityStore interface {
 	AcquireTaskProxyActivity(int64) error
 	ReleaseTaskProxyActivity(int64) error

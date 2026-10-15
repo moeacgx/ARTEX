@@ -68,11 +68,12 @@ func (s *Server) chatUpload(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, 404, "task not found")
 			return
 		}
-		if !s.engine.beginTaskOperation(id) {
+		finish, ok := s.engine.beginTaskOperationFinish(id)
+		if !ok {
 			writeErr(w, http.StatusConflict, "任务正在删除，无法上传附件")
 			return
 		}
-		defer s.engine.decInflight(id)
+		defer finish()
 	}
 	dir := filepath.Join(s.m.dir, sub, id, "uploads")
 	if err := os.MkdirAll(dir, 0o755); err != nil {

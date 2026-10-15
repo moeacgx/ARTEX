@@ -761,10 +761,9 @@ func (e *Engine) Ready() bool {
 // An explicit task profile chain can be runnable even when no global default
 // provider is configured, so task status must not rely on Ready alone.
 func (e *Engine) ReadyFor(t *Task) bool {
-	if !e.beginTaskOperation(t.ID) {
+	if t == nil {
 		return false
 	}
-	defer e.decInflight(t.ID)
 	if e.taskReadiness != nil {
 		return e.taskReadiness(t)
 	}
@@ -993,7 +992,13 @@ func (e *Engine) workerLoop(ctx context.Context, t *Task, name string) {
 		}
 		opCtx, finish, admitted := e.beginTaskOperationContext(e.execContextFor(ctx, t.ID), t.ID)
 		if !admitted {
-			return
+			// 准入失败可能是短暂的代理回收/恢复屏障；保留 Worker 槽位，使用
+			// 循环上下文退避重试。只有任务循环被正式取消时才退出，避免一次
+			// 瞬时失败永久丢失 Worker。
+			if sleepCtx(ctx, 1500*time.Millisecond) {
+				return
+			}
+			continue
 		}
 		_, worker := e.snapshotFor(t, opCtx)
 		if worker == nil {
