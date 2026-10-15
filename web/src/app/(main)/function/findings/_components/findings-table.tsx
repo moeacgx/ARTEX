@@ -207,7 +207,10 @@ export function FindingsTable({
                         className="truncate font-medium hover:text-primary hover:underline"
                         title="查看发现详情"
                       >
-                        {f.name || f.vulnclass || "未分类"}
+                        <span className="flex min-w-0 items-center gap-1.5">
+                          <span className="shrink-0 font-mono text-xs text-muted-foreground">#{f.finding_id}</span>
+                          <span className="truncate">{f.name || f.vulnclass || "未分类"}</span>
+                        </span>
                       </Link>
                     ) : (
                       <span className="truncate font-medium">{f.name || f.vulnclass || "未分类"}</span>

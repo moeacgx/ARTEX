@@ -5,6 +5,7 @@ import * as React from "react";
 import { AtSignIcon, ChevronRightIcon, Loader2Icon, XIcon } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
+import { Input } from "@/components/ui/input";
 import { InputGroupTextarea } from "@/components/ui/input-group";
 import { Popover, PopoverAnchor, PopoverContent } from "@/components/ui/popover";
 import { Textarea } from "@/components/ui/textarea";
@@ -149,6 +150,19 @@ export function MentionTextarea({ value, onValueChange, onKeyDown, className, in
     else if (items[index]) replaceActive(`${mentionToken(items[index])} `, true);
   }
 
+  // 选择类型后，弹层顶部的搜索框直接编辑当前 @ 类型的查询词；
+  // 不把焦点抢回文本区，方便连续输入和鼠标选择候选。
+  function updateSearchQuery(nextQuery: string) {
+    if (!active || !search.kind) return;
+    const label = mentionKinds.find((kind) => kind.kind === search.kind)?.label ?? "漏洞";
+    const replacement = `@${label} ${nextQuery}`;
+    const nextValue = value.slice(0, active.start) + replacement + value.slice(active.end);
+    onValueChange(nextValue);
+    setCursor(active.start + replacement.length);
+    setDismissed(false);
+    setActiveIndex(0);
+  }
+
   function keyDown(event: React.KeyboardEvent<HTMLTextAreaElement>) {
     if (composing.current || event.nativeEvent.isComposing || event.keyCode === 229) return;
     if (open) {
@@ -232,6 +246,19 @@ export function MentionTextarea({ value, onValueChange, onKeyDown, className, in
           }}
           aria-label="选择引用记录"
         >
+          {!categories.length && search.kind && (
+            <div className="px-1 pt-1">
+              <Input
+                value={search.query}
+                onChange={(event) => updateSearchQuery(event.target.value)}
+                placeholder={`搜索${mentionKinds.find((kind) => kind.kind === search.kind)?.label ?? "记录"}名称、地址或 ID`}
+                aria-label={`搜索${mentionKinds.find((kind) => kind.kind === search.kind)?.label ?? "引用记录"}`}
+                autoComplete="off"
+                autoCorrect="off"
+                spellCheck={false}
+              />
+            </div>
+          )}
           <div className="flex items-center justify-between px-2 py-1 text-muted-foreground text-xs">
             <span>
               {categories.length
