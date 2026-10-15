@@ -1,0 +1,62 @@
+name: dev-build
+
+on:
+  push:
+    branches: [dev]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dev-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    if: github.ref == 'refs/heads/dev'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci --ignore-scripts
+        working-directory: web
+      - name: 构建真实前端
+        working-directory: web
+        env:
+          NEXT_EXPORT: '1'
+          NEXT_PUBLIC_MOCK: '0'
+        run: npx next build --webpack
+      - name: 嵌入前端并构建线上候选程序
+        env:
+          ARTEX_SKIP_FRONTEND: '1'
+          ARTEX_COMPRESS: '0'
+          ARTEX_PACKAGE: '1'
+          ARTEX_PACKAGE_DIR: dist
+        run: |
+          mkdir -p server/webui/dist
+          rsync -a --delete web/out/ server/webui/dist/
+          export ARTEX_BUILD_VERSION="dev-${GITHUB_SHA:0:12}"
+          ./build.sh --target linux/amd64
+          dist/artex-linux-amd64/artex -h
+          cd dist
+          sha256sum *.zip > SHA256SUMS
+          sha256sum -c SHA256SUMS
+          printf '{"commit":"%s","version":"%s","run_id":"%s"}\n' "$GITHUB_SHA" "$ARTEX_BUILD_VERSION" "$GITHUB_RUN_ID" > SOURCE.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dev-linux-amd64-${{ github.sha }}
+          path: |
+            dist/*.zip
+            dist/SHA256SUMS
+            dist/SOURCE.json
+          if-no-files-found: error
+          retention-days: 30
