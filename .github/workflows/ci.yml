@@ -80,6 +80,13 @@ jobs:
         run: |
           timeout 60s go test ./server -run '^(TestPlannerPGRestart|TestPlannerPGUnavailableResolver|TestPlannerPGProxyRecovers|TestPlannerPGLeaseRecovery|TestPlannerPGRetryHonors|TestPlannerPGGracefulRestart|TestServerShutdown)' -count=1 -timeout 60s
           timeout 60s go test ./db -run '^(TestTaskActivityRecoveryReleasesOnlyOwnedWarpTokens|TestPlannerRun)' -count=1 -timeout 60s
+      - name: 待领队列防饥饿和 Worker 等待超时回归
+        run: |
+          timeout 60s go test ./db -run '^(TestFrontierAging|TestExplorationFlow)' -count=1 -timeout 60s
+          timeout 60s go test ./agent -run '^(TestWorker(HardDeadline|SoftBudget|Unlimited)|TestTerminalText)' -count=1 -timeout 60s
+          timeout 60s go test ./server -run '^(TestWorkerPGHardTimeout|TestWorkerModelTimeoutDoesNotReplayIntent)' -count=1 -timeout 60s
+          cd norma
+          timeout 60s go test ./harness -run '^(TestConsumerStop|TestUnlimited|TestHard|TestSettlementOnToolOverrunsBudget|TestParentCancelStillAbortsNoSettlement)' -count=1 -timeout 60s
       - name: 容器退出证明与维护入口回归
         env:
           ARTEX_WARP_HEALTH_TEST_DSN: postgres://artex_test:artex_test@127.0.0.1:5432/artex_warp_container_exit_test?sslmode=disable

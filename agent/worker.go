@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -376,7 +377,12 @@ func (w *Worker) ExecuteWithMessage(ctx context.Context, name string, taskID int
 	return w.execute(ctx, name, taskID, as, ts, intent, hooks, emit, enr, notifyFinding, strings.TrimSpace(requestID), strings.TrimSpace(message))
 }
 
-func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.AssetStore, ts *db.ExplorationStore, intent *db.Node, hooks harness.HookRunner, emit func(db.Activity), enr EnrichTrigger, notifyFinding func(int64, string), requestID, message string) (harness.TerminalReason, WriteCounts, error) {
+func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.AssetStore, ts *db.ExplorationStore, intent *db.Node, hooks harness.HookRunner, emit func(db.Activity), enr EnrichTrigger, notifyFinding func(int64, string), requestID, message string) (reason harness.TerminalReason, writes WriteCounts, err error) {
+	started := time.Now()
+	tc := taskClockFrom(ctx)
+	maxDur, clamped := clampMaxDuration(tc.DeadlineUnix, w.runTimeout)
+	ctx, cancel := workerRunContext(ctx, maxDur)
+	defer cancel()
 	tsx := NewToolSet(ts, name)
 	tsx.SetFindingRecorder(w.findingRecorder)
 	tsx.SetTaskID(taskID)
@@ -398,6 +404,15 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	ctx = WithRunInfo(ctx, RunInfo{TaskID: taskID, ExplorationID: explorationID(ts), IntentID: intent.ID})
 	tools, def, cleanup := AugmentTools(ctx, "worker", base)
 	defer cleanup()
+	if ctx.Err() != nil {
+		reason, err = workerTerminal(ctx, "", ctx.Err())
+		if emit != nil {
+			id := intent.ID
+			sum, detail := terminalText(ctx, &harness.Terminal{Reason: reason, Err: err}, &runTrace{startedAt: started})
+			emit(db.Activity{Kind: "result", NodeID: &id, Worker: name, IsError: err != nil, Summary: firstLine(sum, 400), Detail: detail})
+		}
+		return reason, tsx.Writes(), err
+	}
 
 	// 意图是 worker 的【唯一职责、贯穿整个 run 的不变量】→ 连同启动指令、意图锚定的目标资产
 	// 原始数据一起放进 system prompt：system 每次 run 都重新拼一遍、绝不会被 compaction 压掉，
@@ -438,8 +453,6 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	sysBody += "\n\n开始执行上面这条意图：只做它、只产生事实、assets、finding、做完即停。"
 	system, boundary := deferredSystem(sysBody, def)
 	// 任务级 deadline(经 ctx 注入)夹逼本 run 的墙钟预算 + 决定收尾词(见 taskclock.go)。
-	tc := taskClockFrom(ctx)
-	maxDur, clamped := clampMaxDuration(tc.DeadlineUnix, w.runTimeout)
 	settle := wrapupSettlement("worker", []string{"Bash"})
 	if tc.DeadlineUnix > 0 {
 		settle = wrapupSettlementForTask("worker", []string{"Bash"}, clamped)
@@ -472,9 +485,11 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 		BashEnv:    taskProxyEnv(w.proxyAddr, w.proxyCACert, w.strictProxy),
 		WorkingDir: runDir,
 		MaxTurns:   w.maxTurns, // 0 = unlimited (configurable in agent management)
-		// 墙钟预算,轮边界判,不打断半路;0 = 不限。有任务级 deadline 时夹逼到 min(自身预算,
-		// 距 deadline 剩余),让本 run 在任务到点时自然进收尾(见 taskclock.go)。
-		MaxDuration: maxDur,
+		// 正常预算到点中断工具并尝试收尾；0 表示不限。有任务截止时取更早的预算。
+		MaxDuration: workerRemainingBudget(started, maxDur),
+		// 仅有限预算启用 SDK 的硬截止；绝对截止由外层 ctx 固定，
+		// 预取耗时不能在模型开始时重新获得一整份运行预算。
+		HardMaxDuration: workerRemainingHardBudget(ctx, maxDur),
 		// 命中预算(轮次 OR 时长)→ SDK 跑一轮收尾(隐藏 Bash),把已识别的写回,避免烂尾。
 		// clamped(被任务 deadline 夹逼)时用 PromptByReason:因超时=任务到点→任务超时词,
 		// 因步数=夹逼窗口内步数先耗尽→回落 per-run 词。非 clamped 维持纯 per-run。
@@ -516,7 +531,15 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	opts.BashEnv = browserRunEnvironment(opts.BashEnv)
 	defer closeRunBrowser(ctx, opts.WorkingDir, opts.BashEnv)
 	s := agentcore.NewSession(opts)
-	defer closeProxySession(ctx, s)
+	defer func() {
+		// 终态已由 capture 发出，但操作占用必须等真实工具及 Session 全部退出。
+		waitErr := harness.WaitForToolExit(context.Background(), err)
+		closeErr := s.CloseAndWait(context.Background())
+		if waitErr != nil || closeErr != nil {
+			ReportProxyCleanupFailure(ctx)
+		}
+		err = errors.Join(err, waitErr, closeErr)
+	}()
 
 	// Resume prior conversation if this intent was paused/blocked/exhausted and is
 	// being re-run. The transcript ID is deterministic per intent, so if a prior
@@ -545,12 +568,8 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 		}
 	}
 
-	// Budgets + settlement are owned by the SDK (MaxTurns/MaxDuration + Settlement):
-	// on hit it runs a wrap-up turn and finishes with ReasonMaxTurns/ReasonTimeout.
-	// MaxDuration now interrupts an in-flight tool at the wall-clock deadline and
-	// enters the wrap-up phase on the live ctx, so a run whose tool overran the budget
-	// still settles (no external hard-timeout backstop needed). ctx itself carries only
-	// pause / planner kill / shutdown, which the engine distinguishes and re-queues/stops.
-	_, reason, err := captureRunSession(ctx, s, input, emitWrap)
+	// SDK 的正常预算先尝试收尾；心跳空转或收尾卡住最终由外层硬截止打断。
+	_, reason, err = captureRunSession(ctx, s, input, emitWrap)
+	reason, err = workerTerminal(ctx, reason, err)
 	return reason, tsx.Writes(), err
 }

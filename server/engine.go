@@ -77,11 +77,12 @@ const (
 
 var errWorkControlConflict = errors.New("work control conflict")
 
-// retryableWorkerModelError excludes errors already handled by the task router.
-// In particular, a quota error after partial streaming advances the task cursor
-// for the next LLM call but must not replay this whole intent on the backup.
+// 超时可能发生在请求或工具已经生效之后，不能重放整条意图。
+// 任务路由已经处理的错误同样不能再次触发 Worker 重跑。
 func retryableWorkerModelError(reason harness.TerminalReason, err error) bool {
-	return reason == harness.ReasonModelError && !isTaskLLMRuntimeError(err)
+	return reason == harness.ReasonModelError && !isTaskLLMRuntimeError(err) &&
+		!llm.IsRequestTimeout(err) && !errors.Is(err, harness.ErrHardDeadlineExceeded) &&
+		!errors.Is(err, harness.ErrHardDeadlineCleanup)
 }
 
 // Engine drives the event-driven exploration loop with real LLM agents
@@ -1242,14 +1243,14 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker *ag
 	// 试过但没真正做完、需换角度，而非当成已覆盖永久跳过）；出错→blocked；正常→done。
 	state := "done"
 	switch {
+	case reason == harness.ReasonTimeout:
+		state = "exhausted"
+		log.Printf("[worker %s] intent %d 运行超时(exhausted)，本次写回 %s", name, intent.ID, wrote)
 	case err != nil:
 		state = "blocked"
 	case reason == harness.ReasonMaxTurns:
 		state = "exhausted"
 		log.Printf("[worker %s] intent %d 撞步数上限(exhausted)，本次写回 %s", name, intent.ID, wrote)
-	case reason == harness.ReasonTimeout:
-		state = "exhausted"
-		log.Printf("[worker %s] intent %d 运行超时(exhausted)，收尾后写回 %s", name, intent.ID, wrote)
 	}
 	if state == "blocked" && isTaskLLMChainExhausted(err) {
 		_ = t.Store.SetIntentBlockedReason(intent.ID, db.IntentBlockedLLMQuota)

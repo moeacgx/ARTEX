@@ -423,6 +423,8 @@ func (l *loop) run() {
 		usageBefore := l.usage
 		asst, exec, stopReason, streamErr, consumerStopped, aborted := l.streamAndExecute(schemas)
 		if consumerStopped {
+			// 消费方提前停止后无法再交付待清理错误，必须在迭代返回前确认工具真退出。
+			_ = WaitForToolExit(context.Background(), streamErr)
 			return
 		}
 		if streamErr != nil {
@@ -791,7 +793,7 @@ func (l *loop) requestMessages() []llm.Message {
 
 func (l *loop) streamAndExecute(schemas []llm.ToolSchema) (asst llm.Message, exec *streamExec, stopReason string, err error, consumerStopped, aborted bool) {
 	defer func() {
-		if exec != nil && l.in.HardMaxDuration > 0 {
+		if exec != nil {
 			err = errors.Join(err, exec.closeAndWait(l.hardCleanupTimeout()))
 		}
 	}()

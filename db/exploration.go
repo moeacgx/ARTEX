@@ -1166,14 +1166,17 @@ func (s *ExplorationStore) FindingIntentsTerminal() (map[int64]int64, error) {
 	return out, rows.Err()
 }
 
-// Frontier returns open intents ordered by priority desc then id (FIFO tiebreak).
+// 待领意图按创建后的累计年龄每 20 分钟提升一级调度优先级，最高 10 级；同级按原入队顺序。
+// 只改变领取顺序，不修改保存的优先级或状态，避免持续新增高优先级使旧意图饿死。
 func (s *ExplorationStore) Frontier(limit int) ([]*Node, error) {
 	if limit <= 0 {
 		limit = 50
 	}
 	rows, err := s.db.Query(`SELECT `+nodeCols+` FROM exploration_nodes
 WHERE exploration_id=$1 AND kind='intent' AND state='open'
-ORDER BY priority DESC, id ASC LIMIT $2`, s.expID, limit)
+ORDER BY LEAST(10, GREATEST(0,LEAST(10,priority)) +
+ FLOOR(GREATEST(0,EXTRACT(EPOCH FROM (statement_timestamp()-created_at))) / 1200)) DESC,
+ id ASC LIMIT $2`, s.expID, limit)
 	if err != nil {
 		return nil, err
 	}

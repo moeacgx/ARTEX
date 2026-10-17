@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -49,6 +50,7 @@ var reasonHint = map[harness.TerminalReason]string{
 func terminalText(ctx context.Context, term *harness.Terminal, tr *runTrace) (string, string) {
 	reason := term.Reason
 	aborted := reason == harness.ReasonAbortedStreaming || reason == harness.ReasonAbortedTools
+	hardTimeout := errors.Is(term.Err, harness.ErrHardDeadlineExceeded)
 	// Prompt may return ctx.Err directly without a terminal event. Preserve the
 	// cancellation cause instead of falling back to an empty/unknown terminal reason.
 	if reason == "" && ctx.Err() != nil {
@@ -69,6 +71,8 @@ func terminalText(ctx context.Context, term *harness.Terminal, tr *runTrace) (st
 			stage = "工具执行阶段"
 		}
 		sum = "（运行被中断：" + short + "；停在" + stage + progressSuffix(term, tr) + "，未完成）"
+	} else if hardTimeout {
+		sum = "（达到整次运行硬截止，模型等待或收尾未及时结束" + progressSuffix(term, tr) + "；已落库结果保留，未完成部分交由规划者重新规划）"
 	} else if reason == harness.ReasonMaxTurns || reason == harness.ReasonTimeout {
 		sum = "（达到运行预算上限(" + string(reason) + ")，已收尾写回事实" + progressSuffix(term, tr) + "；本次无文字总结）"
 	} else {
@@ -80,7 +84,11 @@ func terminalText(ctx context.Context, term *harness.Terminal, tr *runTrace) (st
 	b.WriteString(sum)
 	b.WriteString("\n\n")
 	displayReason := terminalReasonLabel(reason)
-	fmt.Fprintf(&b, "- **终态**: `%s` - %s\n", displayReason, terminalReasonHint(reason))
+	hint := terminalReasonHint(reason)
+	if hardTimeout {
+		hint = "已到达整次运行硬截止；无法保证本轮收尾完成，已落库事实和资产保留，未完成部分需重新规划"
+	}
+	fmt.Fprintf(&b, "- **终态**: `%s` - %s\n", displayReason, hint)
 	if aborted {
 		code, _, why, ok := AbortReason(ctx)
 		if ok {

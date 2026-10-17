@@ -137,6 +137,19 @@ func TestTerminalTextNonAbortReasons(t *testing.T) {
 	}
 }
 
+func TestTerminalTextHardTimeoutDoesNotClaimSettlementSucceeded(t *testing.T) {
+	summary, detail := terminalText(context.Background(), &harness.Terminal{
+		Reason: harness.ReasonTimeout,
+		Err:    harness.ErrHardDeadlineExceeded,
+	}, &runTrace{startedAt: time.Now()})
+	if strings.Contains(summary, "已收尾") || strings.Contains(detail, "已执行收尾") {
+		t.Fatalf("硬截止不能声称模型完成了收尾: %s\n%s", summary, detail)
+	}
+	if !strings.Contains(summary, "硬截止") || !strings.Contains(detail, "已落库") {
+		t.Fatalf("缺少硬截止原因和历史结果说明: %s\n%s", summary, detail)
+	}
+}
+
 func TestAbortCausesAreWellFormed(t *testing.T) {
 	all := []*AbortCause{
 		AbortPausedByUser, AbortPausedByOrchestrator, AbortTaskDeleted, AbortPausedOnReload,
