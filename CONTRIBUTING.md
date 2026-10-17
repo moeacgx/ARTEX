@@ -21,6 +21,28 @@ dev 的每次推送触发 CI 和 `dev-build`。构建产物为 Actions artifact 
 
 强制终止、断电或清理失败留下的旧活动引用仍按正式恢复流程处理。数据库会话消失不能证明浏览器、工具或外部租约已经退出，禁止通过清引用或改任务状态绕过这一保护。
 
+### 容器迁移后的 WARP 退出确认
+
+重建容器会改变 hostname。若旧 WARP 的 `process.json` 尚未记录真实退出，正常健康恢复会拒绝跨容器推断。不要更改 hostname、删除进程文件或直接清除健康 claim。已由正常关停写入的 `exited=true` 记录可以随数据卷迁移，仍保留原 Host/PID。
+
+维护时先保存本机 Docker 正常停止的审计文件（旧完整容器 ID、`status=exited`、`pid=0`、`exit_code=0`、`finished`、停止前的宿主 `old_pids` 以及为空的 `remaining_old_pids`），固定其 SHA256。旧容器已移除时，也必须保留这份本次真实停止记录。候选 artifact 同时包含已校验的 `artex-warp-recovery-linux-amd64`，在宿主机运行：
+
+```sh
+./artex-warp-recovery-linux-amd64 \
+  --proxy-secrets /实际代理密钥路径/key \
+  --warp-dir /实际数据目录/egress/warp --proxy-id 3 \
+  --expected-revision <当前健康版本> --expected-claim <当前unknown令牌> \
+  --expected-process-sha <原process.json摘要> \
+  --exit-evidence /私有备份目录/old-process-exit.json \
+  --expected-evidence-sha <已核验的停止证据摘要> \
+  --old-container-full-id <旧完整容器ID> \
+  --current-container-full-id <当前完整容器ID>
+```
+
+数据库连接只从 `ARTEX_PG_DSN` 环境变量读取，凭据不得打印。命令仅连接现有数据库，不执行迁移或启动任务。它通过本机 `/var/run/docker.sock` 核验容器身份、当前数据挂载和旧进程消失，持 WARP 独占锁并复核精确版本、unknown claim 与零活动引用后，才写原进程的退出记录；没有 `force` 选项。
+
+命令成功仍保留数据库恢复屏障，接着调用 `POST /api/proxies/{id}/health/recovery`，请求体 `{}`，再通过正常 WARP 恢复和任务恢复流程验收。证据或身份不匹配时保持阻塞；无法确认的远程执行及外部租约不适用此路径。
+
 只有上述验收成功后，执行以下 GitHub 登记。将 `<已验收dev完整SHA>`、`<候选Actions运行地址>` 和 `<脱敏验收证据地址>` 替换为真实值：
 
 ```powershell

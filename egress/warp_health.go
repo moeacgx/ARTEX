@@ -114,6 +114,19 @@ func writeWarpProcessRecord(path string, pid int, exited bool) error {
 	}
 	return privateWrite(filepath.Join(path, "process.json"), warpProcessRecord{host, pid, exited})
 }
+
+func validWarpProcessRecord(record warpProcessRecord) bool {
+	if record.PID < 0 || len(record.Host) == 0 || len(record.Host) > 253 {
+		return false
+	}
+	for _, c := range record.Host {
+		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-' || c == '_' || c == '.') {
+			return false
+		}
+	}
+	return true
+}
+
 func (m *WarpManager) confirmPriorProcess(path string) error {
 	data, err := os.ReadFile(filepath.Join(path, "process.json"))
 	if os.IsNotExist(err) {
@@ -123,14 +136,15 @@ func (m *WarpManager) confirmPriorProcess(path string) error {
 		return ErrWarpExitUnknown
 	}
 	var record warpProcessRecord
-	host, err := os.Hostname()
-	if err != nil || json.Unmarshal(data, &record) != nil || record.Host != host {
+	if json.Unmarshal(data, &record) != nil || !validWarpProcessRecord(record) {
 		return ErrWarpExitUnknown
 	}
+	// 真退出记录可以随数据卷迁移；保留原进程身份，不伪装为新宿主的 PID。
 	if record.Exited {
 		return nil
 	}
-	if record.PID <= 0 {
+	host, err := os.Hostname()
+	if err != nil || record.Host != host || record.PID <= 0 {
 		return ErrWarpExitUnknown
 	}
 	exited, err := warpPIDExited(record.PID)

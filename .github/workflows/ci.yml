@@ -80,6 +80,12 @@ jobs:
         run: |
           timeout 60s go test ./server -run '^(TestPlannerPGRestart|TestPlannerPGUnavailableResolver|TestPlannerPGProxyRecovers|TestPlannerPGLeaseRecovery|TestPlannerPGRetryHonors|TestPlannerPGGracefulRestart|TestServerShutdown)' -count=1 -timeout 60s
           timeout 60s go test ./db -run '^(TestTaskActivityRecoveryReleasesOnlyOwnedWarpTokens|TestPlannerRun)' -count=1 -timeout 60s
+      - name: 容器退出证明与维护入口回归
+        env:
+          ARTEX_WARP_HEALTH_TEST_DSN: postgres://artex_test:artex_test@127.0.0.1:5432/artex_warp_container_exit_test?sslmode=disable
+        run: |
+          timeout 60s go test ./server -run '^TestWarpContainerExit' -count=1 -timeout 60s
+          timeout 60s go test ./maintenance ./egress ./cmd/artex-warp-recovery -count=1 -timeout 60s
 
   checks:
     needs: branch-policy

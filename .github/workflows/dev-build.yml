@@ -47,8 +47,9 @@ jobs:
           export ARTEX_BUILD_VERSION="dev-${GITHUB_SHA:0:12}"
           ./build.sh --target linux/amd64
           dist/artex-linux-amd64/artex -h
+          CGO_ENABLED=0 go build -trimpath -ldflags '-s -w' -o dist/artex-warp-recovery-linux-amd64 ./cmd/artex-warp-recovery
           cd dist
-          sha256sum *.zip > SHA256SUMS
+          sha256sum *.zip artex-warp-recovery-linux-amd64 > SHA256SUMS
           sha256sum -c SHA256SUMS
           printf '{"commit":"%s","version":"%s","run_id":"%s"}\n' "$GITHUB_SHA" "$ARTEX_BUILD_VERSION" "$GITHUB_RUN_ID" > SOURCE.json
       - uses: actions/upload-artifact@v4
@@ -56,6 +57,7 @@ jobs:
           name: dev-linux-amd64-${{ github.sha }}
           path: |
             dist/*.zip
+            dist/artex-warp-recovery-linux-amd64
             dist/SHA256SUMS
             dist/SOURCE.json
           if-no-files-found: error
