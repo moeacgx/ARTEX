@@ -283,41 +283,64 @@ func (sc *Scheduler) fireTaskCreates(triggers []*db.AgentTrigger) {
 // message carries the task id/desc/goal + tool name + (truncated) input & output.
 func (sc *Scheduler) fireToolCalls(triggers []*db.AgentTrigger) {
 	var want []*db.AgentTrigger
+	last, _ := strconv.ParseInt(sc.mustState(schedKeyLastToolCall), 10, 64)
+	positions := map[int64]int64{}
 	for _, tr := range triggers {
 		if tr.OnToolCall && len(tr.ToolNames) > 0 {
 			want = append(want, tr)
+			key := fmt.Sprintf("%s/trigger/%d", schedKeyLastToolCall, tr.ID)
+			value, err := sc.pg.GetSchedState(key)
+			if err != nil {
+				return
+			}
+			position := last
+			if value != "" {
+				position, err = strconv.ParseInt(value, 10, 64)
+				if err != nil {
+					return
+				}
+			} else if err := sc.pg.SetSchedState(key, strconv.FormatInt(last, 10)); err != nil {
+				return
+			}
+			positions[tr.ID] = position
 		}
 	}
-	last, _ := strconv.ParseInt(sc.mustState(schedKeyLastToolCall), 10, 64)
-	events, err := sc.pg.NewToolCallsSince(last)
-	if err != nil || len(events) == 0 {
+	maxID, err := sc.pg.LatestToolCallID()
+	if err != nil {
 		return
 	}
-	// Advance the watermark even with no active trigger — see fireFindings.
-	maxID := last
-	for _, e := range events {
-		if e.NodeID > maxID {
-			maxID = e.NodeID
+	if maxID < last {
+		maxID = last
+	}
+	// 各触发器独立确认准入；暂不可用的报告保留位置，其他触发器不重复执行。
+	for _, tr := range want {
+		position := positions[tr.ID]
+		events, err := sc.pg.ToolCallsForTriggerSince(position, maxID, tr.ToolNames)
+		if err != nil {
+			return
 		}
-		if len(want) == 0 {
-			continue
+		if len(events) == 0 {
+			position = maxID
 		}
-		// A failed finding write has no committed finding to report. Keep other
-		// tool-error triggers available for user-defined automation.
-		if e.ToolIsErr && e.Tool == "report_finding" {
-			continue
-		}
-		errTag := ""
-		if e.ToolIsErr {
-			errTag = "[error] "
-		}
-		msgCtx := fmt.Sprintf("\n\n【本次由工具调用触发】\n工具: %s\n入参: %s\n返回: %s%s",
-			e.Tool, trunc(e.ToolInput, 1500), errTag, trunc(e.ToolOutput, 1500))
-		for _, tr := range want {
-			if !containsFold(tr.ToolNames, e.Tool) {
+		for _, e := range events {
+			if e.NodeID <= position {
 				continue
 			}
-			sc.s.StartTriggeredRun(tr.AgentKey, fmt.Sprintf("工具触发 · %s · task#%d", e.Tool, e.TaskID), tr.ToolCallMessage+msgCtx, e.TaskID, true, e.TaskDesc, e.TaskGoal)
+			if containsFold(tr.ToolNames, e.Tool) && !(e.ToolIsErr && e.Tool == "report_finding") {
+				errTag := ""
+				if e.ToolIsErr {
+					errTag = "[error] "
+				}
+				msgCtx := fmt.Sprintf("\n\n【本次由工具调用触发】\n工具: %s\n入参: %s\n返回: %s%s",
+					e.Tool, trunc(e.ToolInput, 1500), errTag, trunc(e.ToolOutput, 1500))
+				if !sc.s.StartTriggeredRun(tr.AgentKey, fmt.Sprintf("工具触发 · %s · task#%d", e.Tool, e.TaskID), tr.ToolCallMessage+msgCtx, e.TaskID, true, e.TaskDesc, e.TaskGoal) {
+					break
+				}
+			}
+			position = e.NodeID
+		}
+		if err := sc.pg.SetSchedState(fmt.Sprintf("%s/trigger/%d", schedKeyLastToolCall, tr.ID), strconv.FormatInt(position, 10)); err != nil {
+			return
 		}
 	}
 	_ = sc.pg.SetSchedState(schedKeyLastToolCall, strconv.FormatInt(maxID, 10))

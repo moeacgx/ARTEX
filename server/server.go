@@ -82,8 +82,7 @@ type Server struct {
 	// counts in-flight runs per agent (replaces a boolean drain flag); a run's
 	// completion decrements it and re-pumps to fill the freed slot. triggerCfg caches
 	// the agent's last-read策略 so the pump never queries the DB while holding queueMu.
-	// Distinct agents always run concurrently. Queue is in-memory (matches chatBusy); a
-	// restart drops pending fires — the scheduler re-fires from watermarks next tick.
+	// 队列仍为内存状态；工具触发游标只重试尚未准入的事件，不恢复已入队会话。
 	queueMu       sync.Mutex
 	triggerQ      map[string][]triggeredRun
 	triggerActive map[string]int
@@ -432,10 +431,10 @@ func (s *Server) applyLLM(cfg agent.Config) error {
 	// and Agent bindings, otherwise each path owns a separate rate limiter.
 	if active, _ := s.m.pg.ActiveProfile(); active != nil {
 		if activeCfg, ok := s.loadProfileConfig(active.ID); ok && activeCfg == cfg {
-			var ready bool
-			prov, _, ready = s.providerForProfile(active.ID)
-			if !ready {
-				return db.ErrLLMModelUnavailable
+			var err error
+			prov, _, err = s.providerForTaskSelectionResult(db.LLMModelSelection{ProfileID: active.ID}, nil)
+			if err != nil {
+				return err
 			}
 		}
 	}
@@ -601,17 +600,26 @@ func (s *Server) providerForSelection(selection db.LLMModelSelection) (llm.Provi
 }
 
 func (s *Server) providerForTaskSelection(selection db.LLMModelSelection, t *Task, contexts ...context.Context) (llm.Provider, agent.Config, bool) {
+	prov, cfg, err := s.providerForTaskSelectionResult(selection, t, contexts...)
+	return prov, cfg, err == nil
+}
+
+// 初始化保留模型与出口的真实错误；运行中的可用性检查沿用布尔结果。
+func (s *Server) providerForTaskSelectionResult(selection db.LLMModelSelection, t *Task, contexts ...context.Context) (llm.Provider, agent.Config, error) {
 	cfg, model, ok := s.loadSelectionConfig(selection)
 	if !ok {
-		return nil, agent.Config{}, false
+		return nil, agent.Config{}, db.ErrLLMModelUnavailable
 	}
 	p, err := s.m.pg.ProfileByID(selection.ProfileID)
-	if err != nil || p == nil {
-		return nil, agent.Config{}, false
+	if err != nil {
+		return nil, agent.Config{}, err
+	}
+	if p == nil {
+		return nil, agent.Config{}, db.ErrLLMModelUnavailable
 	}
 	proxy, err := s.m.ResolveLLMProxySelection(firstContext(contexts), t, p.Proxy, p.ProxyMode, p.ProxyID)
 	if err != nil {
-		return nil, agent.Config{}, false
+		return nil, agent.Config{}, err
 	}
 	cfg.Proxy = proxy
 	id, key := selection.ProfileID, fmt.Sprintf("%s:%x", model.MemberKey(), sha256.Sum256([]byte(proxy)))
@@ -624,14 +632,14 @@ func (s *Server) providerForTaskSelection(selection db.LLMModelSelection, t *Tas
 	}
 	if e := s.provByModel[key]; e != nil && e.cfg == cfg {
 		s.provCacheMu.Unlock()
-		return e.prov, e.cfg, true
+		return e.prov, e.cfg, nil
 	}
 	generation := s.provCacheGen
 	s.provCacheMu.Unlock()
 	prov, err := cfg.NewProvider()
 	if err != nil {
 		log.Printf("[engine] build provider for LLM profile %d failed: %v", id, err)
-		return nil, agent.Config{}, false
+		return nil, agent.Config{}, err
 	}
 	closeIdle := agent.ProviderCloseIdle(prov)
 	// Wrap with recorder, tagged with this profile's name.
@@ -648,7 +656,7 @@ func (s *Server) providerForTaskSelection(selection db.LLMModelSelection, t *Tas
 	s.provCacheMu.Lock()
 	if generation != s.provCacheGen {
 		s.provCacheMu.Unlock()
-		return s.providerForTaskSelection(selection, t, contexts...)
+		return s.providerForTaskSelectionResult(selection, t, contexts...)
 	}
 	if e := s.provByModel[key]; e != nil && e.cfg == cfg { // lost the race → keep the winner
 		prov, cfg = e.prov, e.cfg
@@ -657,7 +665,7 @@ func (s *Server) providerForTaskSelection(selection db.LLMModelSelection, t *Tas
 		log.Printf("[engine] built provider for LLM profile %d (%s / %s)", id, cfg.Provider(), cfg.Model)
 	}
 	s.provCacheMu.Unlock()
-	return prov, cfg, true
+	return prov, cfg, nil
 }
 
 // chatAgentForProfile returns a ChatAgent built from a specific LLM profile, cached

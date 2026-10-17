@@ -3,6 +3,7 @@ package db
 import (
 	"database/sql"
 	"encoding/json"
+	"strings"
 	"time"
 )
 
@@ -76,7 +77,10 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) RETURNING `+triggerC
 
 // UpdateTrigger updates a trigger's fields (not last_fire).
 func (d *DB) UpdateTrigger(t *AgentTrigger) error {
-	_, err := d.Exec(`UPDATE agent_triggers SET enabled=$2, interval_sec=$3, on_finding=$4, on_goal_met=$5, on_task_timeout=$6, on_tool_call=$7, on_task_create=$8, interval_message=$9, finding_message=$10, goal_message=$11, task_timeout_message=$12, tool_call_message=$13, task_create_message=$14, tool_names=$15 WHERE id=$1`,
+	// 修改、停用或重新启用后从当前扫描位置开始，不回放旧条件下的积压。
+	_, err := d.Exec(`WITH changed AS (
+UPDATE agent_triggers SET enabled=$2, interval_sec=$3, on_finding=$4, on_goal_met=$5, on_task_timeout=$6, on_tool_call=$7, on_task_create=$8, interval_message=$9, finding_message=$10, goal_message=$11, task_timeout_message=$12, tool_call_message=$13, task_create_message=$14, tool_names=$15 WHERE id=$1 RETURNING id
+) DELETE FROM scheduler_state s USING changed c WHERE s.key='last_toolcall_id/trigger/' || c.id::text`,
 		t.ID, t.Enabled, t.IntervalSec, t.OnFinding, t.OnGoalMet, t.OnTaskTimeout, t.OnToolCall, t.OnTaskCreate,
 		t.IntervalMessage, t.FindingMessage, t.GoalMessage, t.TaskTimeoutMessage, t.ToolCallMessage, t.TaskCreateMessage, marshalToolNames(t.ToolNames))
 	return err
@@ -84,7 +88,8 @@ func (d *DB) UpdateTrigger(t *AgentTrigger) error {
 
 // DeleteTrigger removes a trigger.
 func (d *DB) DeleteTrigger(id int64) error {
-	_, err := d.Exec(`DELETE FROM agent_triggers WHERE id=$1`, id)
+	_, err := d.Exec(`WITH removed AS (DELETE FROM agent_triggers WHERE id=$1 RETURNING id)
+DELETE FROM scheduler_state s USING removed r WHERE s.key='last_toolcall_id/trigger/' || r.id::text`, id)
 	return err
 }
 
@@ -123,7 +128,8 @@ func (d *DB) TouchTriggerFire(id int64) error {
 
 // DeleteTriggersForAgent removes all triggers of an agent (custom agent delete).
 func (d *DB) DeleteTriggersForAgent(agentKey string) error {
-	_, err := d.Exec(`DELETE FROM agent_triggers WHERE agent_key=$1`, agentKey)
+	_, err := d.Exec(`WITH removed AS (DELETE FROM agent_triggers WHERE agent_key=$1 RETURNING id)
+DELETE FROM scheduler_state s USING removed r WHERE s.key='last_toolcall_id/trigger/' || r.id::text`, agentKey)
 	return err
 }
 
@@ -255,6 +261,35 @@ ORDER BY r.id`, lastID)
 	if err != nil {
 		return nil, err
 	}
+	return scanToolCallEvents(rows)
+}
+
+// LatestToolCallID 只读取扫描位置，不加载积压工具的输入、输出正文。
+func (d *DB) LatestToolCallID() (id int64, err error) {
+	err = d.QueryRow(`SELECT COALESCE(max(r.id),0) FROM activity r
+JOIN tasks t ON t.exploration_id=r.exploration_id
+WHERE r.kind='tool_result' AND r.tool<>'' AND t.deleted_at IS NULL`).Scan(&id)
+	return
+}
+
+// ToolCallsForTriggerSince 只读取匹配工具，每轮至多处理 100 条积压事件。
+func (d *DB) ToolCallsForTriggerSince(afterID, throughID int64, tools []string) ([]TaskEvent, error) {
+	names := make([]string, len(tools))
+	for i, name := range tools {
+		names[i] = strings.ToLower(name)
+	}
+	rows, err := d.Query(`SELECT r.id,t.id,t.description,t.goal,r.tool,COALESCE(u.detail,''),COALESCE(r.detail,''),r.is_error
+FROM activity r JOIN tasks t ON t.exploration_id=r.exploration_id
+LEFT JOIN activity u ON u.exploration_id=r.exploration_id AND u.tool_use_id=r.tool_use_id AND u.kind='tool_use'
+WHERE r.kind='tool_result' AND r.id>$1 AND r.id<=$2 AND lower(r.tool)=ANY($3::text[]) AND t.deleted_at IS NULL
+ORDER BY r.id LIMIT 100`, afterID, throughID, names)
+	if err != nil {
+		return nil, err
+	}
+	return scanToolCallEvents(rows)
+}
+
+func scanToolCallEvents(rows *sql.Rows) ([]TaskEvent, error) {
 	defer rows.Close()
 	out := []TaskEvent{}
 	for rows.Next() {

@@ -627,16 +627,38 @@ func (s *Server) readTriggerBehavior(agentKey string) triggerBehavior {
 // agent's策略 decides concurrency + merge: serial → run one at a time (optionally
 // merging by task / all / none); parallel → run each fire in its own concurrent
 // conversation up to trigger_max_parallel. Distinct agents always run concurrently.
-func (s *Server) StartTriggeredRun(agentKey, title, message string, taskID int64, mergeable bool, taskDesc, taskGoal string) {
-	if s.m.pg == nil || s.chatAgentRef() == nil {
-		return
+// 返回 false 表示尚未准入，工具触发调度器必须保留该事件的位置以便重试。
+func (s *Server) StartTriggeredRun(agentKey, title, message string, taskID int64, mergeable bool, taskDesc, taskGoal string) bool {
+	if s.m.pg == nil || s.ctx.Err() != nil {
+		return false
+	}
+	// WARP 后台恢复后必须重新解析当前配置，不能依赖启动时的全局实例。
+	a, err := s.m.pg.GetAgentByKey(agentKey)
+	if err != nil || a == nil || !a.Enabled {
+		return false
+	}
+	var ready bool
+	if a.LLMProfileID != nil {
+		_, _, ready = s.providerForSelection(db.LLMModelSelection{ProfileID: *a.LLMProfileID, ModelMode: a.LLMModelMode, ModelID: a.LLMModelID})
+	} else {
+		_, _, ready = s.globalProviderContext(s.ctx, nil)
+	}
+	if !ready {
+		return false
+	}
+	if _, err := s.m.ResolveLLMProxy(s.ctx, nil, ""); err != nil {
+		return false
 	}
 	cfg := s.readTriggerBehavior(agentKey) // DB read BEFORE the lock (never under queueMu)
 	s.queueMu.Lock()
+	defer s.queueMu.Unlock()
+	if s.ctx.Err() != nil {
+		return false
+	}
 	s.triggerCfg[agentKey] = cfg
 	s.triggerQ[agentKey] = append(s.triggerQ[agentKey], triggeredRun{agentKey: agentKey, title: title, message: message, taskID: taskID, taskDesc: taskDesc, taskGoal: taskGoal, mergeable: mergeable})
 	s.pumpLocked(agentKey)
-	s.queueMu.Unlock()
+	return true
 }
 
 // pumpLocked launches queued fires for one agent up to its concurrency limit, then
