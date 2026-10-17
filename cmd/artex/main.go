@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -188,8 +189,15 @@ func run() int {
 
 	log.Println("shutting down...")
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	_ = httpSrv.Shutdown(shutdownCtx)
+	if err := httpSrv.Shutdown(shutdownCtx); err != nil {
+		log.Printf("HTTP 关停未完成，关闭残留连接: %v", err)
+		_ = httpSrv.Close()
+	}
+	cancel()
+	if err := waitForServerShutdown(srv, 45*time.Second); err != nil {
+		log.Printf("服务执行已退出，但出口回收未确认成功: %v", err)
+		return 1
+	}
 	return code
 }
 
@@ -206,4 +214,21 @@ func shutdownContext(signalCtx context.Context) (context.Context, context.Cancel
 		}
 	}()
 	return ctx, shutdown
+}
+
+type serverShutdown interface {
+	Shutdown(context.Context) error
+}
+
+func waitForServerShutdown(srv serverShutdown, window time.Duration) error {
+	for {
+		ctx, cancel := context.WithTimeout(context.Background(), window)
+		err := srv.Shutdown(ctx)
+		timedOut := ctx.Err() != nil && errors.Is(err, context.DeadlineExceeded)
+		cancel()
+		if !timedOut {
+			return err
+		}
+		log.Println("服务仍在等待模型、工具或出口真实退出，保留资源，暂不重启")
+	}
 }

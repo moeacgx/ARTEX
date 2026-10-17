@@ -428,6 +428,14 @@ operation_owners=CASE WHEN $2=1 THEN operation_owners-pg_backend_pid()::text ELS
 
 func (x *TaskProxySwitchExecutor) ClearStaleTaskOperations() error {
 	return x.d.withProxySwitchLifecycle(x.conn, func(tx *sql.Tx) error {
+		// 与主体活动在同一事务内释放原 token，避免留下永久阻塞 WARP 恢复的孤立引用。
+		if err := warpHealthLock(context.Background(), tx); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`DELETE FROM warp_proxy_health_activity w USING proxy_subject_activity a,proxy_subject_policies p
+WHERE w.activity_token::text=a.token AND a.policy_id=p.id AND p.task_id=$1`, x.id); err != nil {
+			return err
+		}
 		if _, err := tx.Exec(`DELETE FROM task_proxy_activity WHERE task_id=$1`, x.id); err != nil {
 			return err
 		}

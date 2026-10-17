@@ -297,6 +297,10 @@ func (s *Server) restoreTaskRuntimes() {
 		lifecycle := t.lifecycleSnapshot()
 		if !lifecycle.Queued && !isTerminalStatus(lifecycle.Status) {
 			s.engine.Run(s.ctx, t)
+			if !lifecycle.Paused {
+				// 恢复已有任务也要重读持久图，不能因尚有 open/running 意图跳过 Planner。
+				t.Notify()
+			}
 		}
 	}
 }

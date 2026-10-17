@@ -15,6 +15,8 @@ services:
     restart: unless-stopped
 
   artex:
+    # 给模型、工具及出口回收留出真实退出时间，避免默认 10 秒后被强制终止。
+    stop_grace_period: 2m
     # 镜像由本仓库的版本标签自动发布到 GitHub Packages。
     # 正常部署直接拉取本镜像；拉取失败（或想改代码）时本地构建：
     #   docker compose build

@@ -76,6 +76,10 @@ jobs:
           timeout 60s go test ./server
           -run '^(TestTriggeredRunUsesAgentBoundProfileWithoutGlobalChatAgent|TestReporterSavesReportAfterStartupProxyRecovers|TestToolTriggerRetriesUnavailableAgentWithoutDuplicatingOtherTriggers)$'
           -count=1 -timeout 60s
+      - name: 重启恢复及出口引用回归
+        run: |
+          timeout 60s go test ./server -run '^(TestPlannerPGRestart|TestPlannerPGUnavailableResolver|TestPlannerPGProxyRecovers|TestPlannerPGLeaseRecovery|TestPlannerPGRetryHonors|TestPlannerPGGracefulRestart|TestServerShutdown)' -count=1 -timeout 60s
+          timeout 60s go test ./db -run '^(TestTaskActivityRecoveryReleasesOnlyOwnedWarpTokens|TestPlannerRun)' -count=1 -timeout 60s
 
   checks:
     needs: branch-policy
@@ -90,7 +94,7 @@ jobs:
         run: go test ./... -run '^$' -timeout 60s
       - name: 更新和生命周期定向回归
         run: |
-          timeout 60s go test ./selfupdate ./config -count=1 -timeout 60s
+          timeout 60s go test ./selfupdate ./config ./cmd/artex -count=1 -timeout 60s
           timeout 60s go test ./server -run '^(TestReleaseCache|TestUpdateStatus|TestWorkspaceProtects|TestPauseCancelsWithNamedCause|TestResumeYieldsFreshContext|TestResumeDoesNotClearDeleteBarrier)' -count=1 -timeout 60s
       - uses: actions/setup-node@v4
         with:

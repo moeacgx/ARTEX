@@ -107,6 +107,9 @@ func (e *Engine) beginTaskOperationState(ctx context.Context, taskID string, adm
 	}
 	e.deleteMu.RLock()
 	defer e.deleteMu.RUnlock()
+	if e.shuttingDown {
+		return agent.AbortShutdown
+	}
 	if e.IsDeleting(taskID) {
 		return errors.New("task is being deleted")
 	}
@@ -243,7 +246,7 @@ func (e *Engine) startDeadlineCoordinator(ctx context.Context, t *Task) {
 		return
 	}
 	e.deleteMu.RLock()
-	if e.IsDeleting(t.ID) {
+	if e.shuttingDown || e.IsDeleting(t.ID) {
 		e.deleteMu.RUnlock()
 		return
 	}

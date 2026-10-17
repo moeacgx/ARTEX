@@ -72,6 +72,7 @@ const (
 	modelErrorRetries      = 2               // model_error 收场后额外重试的次数
 	modelErrorRetryBackoff = 3 * time.Second // 每次重试前的退避
 	workControlWaitTimeout = 30 * time.Second
+	plannerAdmissionRetry  = 1500 * time.Millisecond // 准入前暂不可用时保留本次唤醒
 )
 
 var errWorkControlConflict = errors.New("work control conflict")
@@ -106,7 +107,10 @@ type Engine struct {
 	// deleteMu makes installing the delete barrier atomic with registering a new
 	// task operation. Once BeginDelete returns, every admitted writer is reflected
 	// in inflight and every later writer is rejected.
-	deleteMu sync.RWMutex
+	deleteMu       sync.RWMutex
+	shuttingDown   bool // deleteMu 保护，关停后不再接纳新循环或任务操作。
+	shutdown       *engineShutdownState
+	proxyReleaseWG sync.WaitGroup // 等待任务退出后的异步回收请求完成登记。
 
 	// Every long-lived task goroutine (planner, workers and deadline coordinator)
 	// runs under one task-scoped context. Successful deletion cancels that context,
@@ -777,7 +781,7 @@ func (e *Engine) ReadyFor(t *Task) bool {
 func (e *Engine) Run(ctx context.Context, t *Task) {
 	workers := e.m.Workers()
 	e.deleteMu.RLock()
-	if e.IsDeleting(t.ID) {
+	if e.shuttingDown || e.IsDeleting(t.ID) {
 		e.deleteMu.RUnlock()
 		return
 	}
@@ -787,8 +791,10 @@ func (e *Engine) Run(ctx context.Context, t *Task) {
 		return
 	}
 	rt := e.registerTaskRoutines(ctx, t.ID, 1+workers)
+	e.proxyReleaseWG.Add(1)
 	e.deleteMu.RUnlock()
 	go func() {
+		defer e.proxyReleaseWG.Done()
 		<-rt.ctx.Done()
 		rt.wg.Wait()
 		e.requestProxyRelease(t.ID, true)
@@ -831,6 +837,17 @@ func resetPlannerTimer(timer *time.Timer, d time.Duration) {
 	timer.Reset(d)
 }
 
+// 只重试尚未进入模型的规划唤醒；用户控制状态和真实退出屏障仍由原准入路径复核。
+func (e *Engine) plannerRetryAllowed(t *Task) bool {
+	lifecycle := t.lifecycleSnapshot()
+	if lifecycle.Paused || lifecycle.Queued || isTerminalStatus(lifecycle.Status) ||
+		e.IsPaused(t.ID) || e.IsDeleting(t.ID) || e.isSettling(t.ID) {
+		return false
+	}
+	open, err := t.Store.HasOpenGoal()
+	return err != nil || open
+}
+
 func (e *Engine) plannerLoop(ctx context.Context, t *Task) {
 	interval := plannerHeartbeatInterval(t)
 	// 心跳定时器在 loop 入口臂 = 从任务 start 计时:即使是跳过首轮 planner 的 seed 任务
@@ -838,15 +855,22 @@ func (e *Engine) plannerLoop(ctx context.Context, t *Task) {
 	// 触发第一轮规划。之后每次唤醒(边沿/心跳)都重臂 = 距上次任意规划触发的时长。
 	heartbeat := time.NewTimer(interval)
 	defer heartbeat.Stop()
+	// 重试独立于普通心跳：连续通知不能把待恢复的唤醒无限推迟。
+	retryTimer := time.NewTimer(plannerAdmissionRetry)
+	if !retryTimer.Stop() {
+		<-retryTimer.C
+	}
+	defer retryTimer.Stop()
+	var retryC <-chan time.Time
 
 	// runRound 跑一轮规划(含 debounce 合并 + 各 guard)。src 仅用于日志区分触发来源。
-	runRound := func(src string) {
+	runRound := func(src string) (retry bool) {
 		plannerExited, runErr := e.beginPlannerRun(t.ID)
 		if runErr != nil {
 			if !errors.Is(runErr, db.ErrPlannerRunBusy) && !errors.Is(runErr, db.ErrPlannerRunPaused) {
 				log.Printf("[planner] task %s 规划轮准入失败: %v", t.ID, runErr)
 			}
-			return
+			return e.plannerRetryAllowed(t)
 		}
 		var plannerErr error
 		finishOperation := func() {}
@@ -855,14 +879,17 @@ func (e *Engine) plannerLoop(ctx context.Context, t *Task) {
 		}()
 		opCtx, finish, admitted := e.beginTaskOperationContext(e.execContextFor(ctx, t.ID), t.ID)
 		if !admitted {
-			return
+			return e.plannerRetryAllowed(t)
 		}
 		finishOperation = finish
 		// debounce: coalesce a burst of changes into one planning round
 		timer := time.NewTimer(e.debounce)
+		defer timer.Stop()
 	drain:
 		for {
 			select {
+			case <-ctx.Done():
+				return
 			case <-t.notify:
 			case <-timer.C:
 				break drain
@@ -870,7 +897,7 @@ func (e *Engine) plannerLoop(ctx context.Context, t *Task) {
 		}
 		planner, _ := e.snapshotFor(t, opCtx)
 		if planner == nil {
-			return // idle until LLM configured
+			return e.plannerRetryAllowed(t)
 		}
 		if e.IsPaused(t.ID) {
 			return // user-paused: don't plan
@@ -881,7 +908,7 @@ func (e *Engine) plannerLoop(ctx context.Context, t *Task) {
 		// terminal task (goals all met → done, or failed): the run is over. A
 		// resume/nudge — e.g. auto-resume of the active task on restart — must NOT
 		// re-plan (it would burn an LLM round and re-confirm a settled result).
-		if isTerminalStatus(t.lifecycleSnapshot().Status) {
+		if lifecycle := t.lifecycleSnapshot(); lifecycle.Queued || isTerminalStatus(lifecycle.Status) {
 			return
 		}
 		// 任务级超时收尾中:丢弃普通唤醒——worker 收尾写回、Resume 的 Notify 都不再
@@ -945,17 +972,37 @@ func (e *Engine) plannerLoop(ctx context.Context, t *Task) {
 			log.Printf("[planner] task %s 规划完成", t.ID)
 		}
 		e.touch(t.ID)
+		return
 	}
 
 	for {
+		var retry bool
 		select {
 		case <-ctx.Done():
 			return
 		case <-t.notify:
-			runRound("edge") // worker 结束 / finding / kill / resume / seed 首轮
+			retry = runRound("edge") // worker 结束 / finding / kill / resume / seed 首轮
 		case <-heartbeat.C:
 			// 周期兜底:死锁兜底 + 唤醒去监督飞行中的 worker(steer/kill) + 周期复查。
-			runRound("heartbeat")
+			retry = runRound("heartbeat")
+		case <-retryC:
+			retryC = nil
+			if !e.plannerRetryAllowed(t) {
+				continue
+			}
+			retry = runRound("recovery")
+		}
+		if retry && retryC == nil {
+			resetPlannerTimer(retryTimer, plannerAdmissionRetry)
+			retryC = retryTimer.C
+		} else if !retry && retryC != nil {
+			if !retryTimer.Stop() {
+				select {
+				case <-retryTimer.C:
+				default:
+				}
+			}
+			retryC = nil
 		}
 		// 每次唤醒(边沿或心跳)后重臂心跳:任意规划触发都重算这段静置计时。
 		resetPlannerTimer(heartbeat, interval)

@@ -15,11 +15,12 @@ import (
 
 // 操作登记覆盖模型、工具和 MCP 清理。回收与新操作串行，远端回收不持生命周期锁。
 type taskProxyBarrier struct {
-	mu        sync.Mutex
-	changed   chan struct{}
-	pending   bool
-	releasing bool
-	force     bool
+	mu         sync.Mutex
+	changed    chan struct{}
+	pending    bool
+	releasing  bool
+	force      bool
+	releaseErr error // 保留真实回收结果，关停不能把失败当作已完成。
 }
 
 func (e *Engine) proxyBarrier(id string) *taskProxyBarrier {
@@ -148,7 +149,7 @@ func (m *Manager) releaseTaskProxyOccupied(ctx context.Context, t *Task) (result
 func (b *taskProxyBarrier) signal() { close(b.changed); b.changed = make(chan struct{}) }
 
 func (e *Engine) requestProxyRelease(id string, force bool) {
-	if e.m == nil {
+	if e.m == nil || e.m.pg == nil {
 		return
 	}
 	b := e.proxyBarrier(id)
@@ -159,6 +160,7 @@ func (e *Engine) requestProxyRelease(id string, force bool) {
 		return
 	}
 	b.pending = true
+	b.releaseErr = nil
 	b.mu.Unlock()
 	var releaseState db.TaskProxyState
 	if task, ok := e.m.Task(id); ok {
@@ -185,14 +187,16 @@ func (e *Engine) requestProxyRelease(id string, force bool) {
 		ctx, cancel := context.WithTimeout(context.Background(), proxyReleaseTimeout)
 		releaseTask := &Task{ID: id}
 		releaseTask.setProxyState(releaseState)
-		if err := e.m.releaseTaskProxyOccupied(ctx, releaseTask); err != nil && !errors.Is(err, db.ErrProxyInUse) && !errors.Is(err, db.ErrProxyRevisionConflict) {
-			log.Printf("[proxy] 任务 %s 出口回收失败: %v", id, err)
+		releaseErr := e.m.releaseTaskProxyOccupied(ctx, releaseTask)
+		if releaseErr != nil && !errors.Is(releaseErr, db.ErrProxyInUse) && !errors.Is(releaseErr, db.ErrProxyRevisionConflict) {
+			log.Printf("[proxy] 任务 %s 出口回收失败: %v", id, releaseErr)
 		}
 		cancel()
 		b.mu.Lock()
 		b.releasing = false
 		b.pending = false
 		b.force = false
+		b.releaseErr = releaseErr
 		b.signal()
 		b.mu.Unlock()
 	}()
